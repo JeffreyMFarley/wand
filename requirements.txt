@@ -1,0 +1,6 @@
+deep
+django-nose==1.4.1
+Django==1.7
+elasticsearch>=2.0.0,<3.0.0
+mock
+parameterized==0.6.1
