@@ -1,2 +1,9 @@
 name: wand
 mode: proxy
+services:
+  - name: snowflake
+    upstream_url: http://127.0.0.1:8081
+  - name: elasticsearch
+    upstream_url: http://127.0.0.1:9200
+  - name: http
+    upstream_url: http://127.0.0.1:8080

@@ -8,8 +8,8 @@ import (
 
 func TestRouterRunSupportsScaffoldedCommands(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name      string
+		args      []string
 		checkFile string
 	}{
 		{name: "init", args: []string{"init"}, checkFile: "wand.yaml"},
@@ -36,6 +36,11 @@ func TestRouterRunSupportsScaffoldedCommands(t *testing.T) {
 
 			if err := os.Chdir(d); err != nil {
 				t.Fatalf("chdir: %v", err)
+			}
+			if tt.args[0] == "proxy" {
+				if err := os.Setenv("WAND_NONBLOCKING", "1"); err != nil {
+					t.Fatalf("Setenv: %v", err)
+				}
 			}
 
 			r := NewRouter(Config{})

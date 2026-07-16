@@ -1,2 +1,8 @@
 name: http
-mode: proxy
+version: "1"
+normalization:
+  request:
+    remove_fields: []
+  response:
+    remove_fields:
+      - requestId

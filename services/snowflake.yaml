@@ -1,2 +1,24 @@
 name: snowflake
-mode: proxy
+version: "1"
+normalization:
+  request:
+    remove_fields:
+      - sessionId
+      - requestId
+    patterns:
+      - description: "Normalize inline timestamps"
+        location: sql
+        transform: normalize_timestamps
+  response:
+    remove_fields:
+      - queryId
+      - statementStatusUrl
+      - createdOn
+      - took
+    sentinels:
+      - field: sessionId
+        value: wand-fake-session-00000000
+    patterns:
+      - description: "Strip version suffix from names"
+        location: $.results[*].dbName
+        transform: strip_version_suffix

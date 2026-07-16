@@ -1,2 +1,21 @@
 name: elasticsearch
-mode: proxy
+version: "1"
+normalization:
+  request:
+    remove_fields:
+      - _shards
+    patterns:
+      - description: "Normalize timestamps"
+        location: body
+        transform: normalize_timestamps
+  response:
+    remove_fields:
+      - took
+      - timed_out
+    sentinels:
+      - field: _scroll_id
+        value: fake-scroll-id
+    patterns:
+      - description: "Strip version suffix"
+        location: $.hits.hits[*]._index
+        transform: strip_version_suffix

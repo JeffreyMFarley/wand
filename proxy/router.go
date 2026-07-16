@@ -73,7 +73,13 @@ func (r *Router) runProxy(args []string) error {
 	subcommand := strings.ToLower(args[0])
 	switch subcommand {
 	case "start":
-		fmt.Println("proxy sidecar placeholder: started")
+		if os.Getenv("WAND_NONBLOCKING") != "" {
+			fmt.Printf("starting wand proxy on port %d (non-blocking)\n", 8877)
+			return nil
+		}
+		server := NewServer(r.cfg)
+		fmt.Printf("starting wand proxy on port %d\n", server.Port)
+		return server.Start()
 	case "stop":
 		fmt.Println("proxy sidecar placeholder: stopped")
 	default:
