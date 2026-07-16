@@ -22,15 +22,42 @@ func NewRouter(cfg Config) *Router {
 	return &Router{cfg: cfg}
 }
 
+const usageText = `wand — language-agnostic API mocking proxy
+
+Usage:
+  wand <command> [args]
+
+Commands:
+  init                        Scaffold wand.yaml for this project
+  proxy start|stop            Start or stop the proxy sidecar
+  capture [description]       Capture fixtures (Claude resolves scope from description)
+  capture --tests <ids>       Capture fixtures for an explicit set of tests
+  diff [--pr <number>]        Semantic diff of changed fixtures
+  doctor                      livetest all fixtures and classify divergences
+  verify                      ci-mode dry run; report any fixture misses
+  explain <hash>              Describe what scenario a fixture covers
+  scaffold <description>      Generate a test and queue a capture
+  normalizer                  Run normalization discovery/checks
+  help                        Show this help
+
+Environment:
+  WAND_MODE   ci (default) | capture | passthrough | livetest
+  WAND_PORT   proxy listen port (default 8877)
+`
+
 func (r *Router) Run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: wand <command> [args]")
+		fmt.Print(usageText)
+		return nil
 	}
 
 	command := strings.ToLower(args[0])
 	remaining := args[1:]
 
 	switch command {
+	case "help", "-h", "--help":
+		fmt.Print(usageText)
+		return nil
 	case "init":
 		return r.runInit(remaining)
 	case "proxy":
@@ -50,7 +77,7 @@ func (r *Router) Run(args []string) error {
 	case "normalizer":
 		return r.runNormalizer(remaining)
 	default:
-		return fmt.Errorf("unknown command %q", command)
+		return fmt.Errorf("unknown command %q (run 'wand help' for usage)", command)
 	}
 }
 
