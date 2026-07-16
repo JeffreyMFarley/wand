@@ -54,11 +54,37 @@ func (r *Router) Run(args []string) error {
 	}
 }
 
+const defaultWandConfig = `name: wand
+
+proxy:
+  port: 8877
+  mode: ${WAND_MODE:-ci}
+
+services:
+  - name: http
+    upstream_url: http://127.0.0.1:8080
+
+fixtures:
+  path: __fixtures__
+  index: __fixtures__/index.json
+
+claude:
+  model: claude-sonnet-4-6
+  # api key read from ANTHROPIC_API_KEY
+`
+
 func (r *Router) runInit(args []string) error {
 	_ = args
 	configPath := filepath.Join(".", "wand.yaml")
-	content := "name: wand\nmode: proxy\n"
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+	if _, err := os.Stat(configPath); err == nil {
+		// Never clobber an existing config — it holds service upstreams the
+		// proxy needs. Re-running init should be a safe no-op.
+		fmt.Println("wand.yaml already exists; leaving it unchanged")
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(configPath, []byte(defaultWandConfig), 0o644); err != nil {
 		return err
 	}
 	fmt.Println("created wand.yaml")

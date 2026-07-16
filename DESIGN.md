@@ -319,17 +319,24 @@ Streaming calls (`StreamClientInterceptor`) need a separate implementation — s
 ### File naming
 
 Fixtures use BLAKE2b content-addressed naming (16-byte digest, hyphen-segmented into
-4-char groups):
+eight 4-char groups):
 
 ```
 __fixtures__/
   snowflake/
-    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_req.sql
-    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_resp.df
+    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_req.json
+    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_resp.json
   hermes/
     1a3f-22bc-...._req.json
     1a3f-22bc-...._resp.json
 ```
+
+In the v1 format every fixture — request and response, for every service — is stored
+as JSON: a one-line metadata header followed by the JSON body. This replaces the
+per-protocol on-disk formats used by the original `msmt` library (`.sql` for Snowflake
+requests, `.df` parquet for responses, `.pbb` protobuf for Hermes). The proxy is
+language-agnostic, so it speaks one wire format — JSON — and each shim is responsible
+for translating its native payload to and from JSON before it reaches the store.
 
 The hash is computed from the **normalized** request. This means:
 - The same logical request always maps to the same fixture regardless of noise fields.
@@ -457,7 +464,6 @@ wand/
 │   └── go/
 │       └── grpc.go
 ├── examples/               Runnable examples — these are load-bearing (CI tests them)
-│   ├── msmt/               CrossScreen msmt system, refactored to use wand proxy
 │   ├── elasticsearch/      Original blog post scenario in Python
 │   ├── node-postgres/      SQL from Node.js
 │   └── go-grpc/            gRPC from Go
@@ -569,17 +575,28 @@ normalization:
 
 ## Stability and Versioning
 
-Fixture file compatibility is a **hard requirement**. Existing `msmt` fixtures in
-`__fixtures__/snowflake/` and `__fixtures__/hermes/` must be readable by `wand`
-without regeneration.
+`wand` defines its own **v1 fixture format** (JSON header + JSON body, BLAKE2b 16-byte
+hash naming) rather than adopting the original `msmt` on-disk formats byte-for-byte.
+The `msmt` fixtures (`.sql` / `.df` parquet / `.pbb` protobuf, hashed over the Python
+function name plus stringified arguments) are **not** read directly. They are
+regenerated through a one-time `capture` pass against the live services, which writes
+them out in the v1 JSON format. See [Migration Path](#migration-path-from-wand-python).
 
-Rules:
+> **Why the break from `msmt`.** `msmt` hashed over `funcname + str(args)` — a
+> Python-call identity that only a Python process can reproduce. A language-agnostic
+> proxy cannot reconstruct that input from an HTTP request, and its parquet/protobuf
+> response bodies are Python-runtime artifacts. Carrying those forward would have
+> re-coupled the proxy to Python, defeating the core insight. Regeneration is a
+> one-time cost paid once per service by a developer with live access.
+
+Once v1 is in use, stability rules apply going forward:
 - The fixture file format (header + body) is versioned. `wand_version: "1"` is the
   initial version.
 - The proxy reads the version header and fails clearly if incompatible, rather than
   silently mismatching or corrupting.
-- The hash algorithm (BLAKE2b, 16-byte digest) is frozen. Changing it would invalidate
-  every existing fixture — this must never happen in a minor version.
+- The hash algorithm (BLAKE2b, 16-byte digest, rendered as eight hyphen-separated
+  4-char hex groups) is frozen. Changing it would invalidate every v1 fixture — this
+  must never happen in a minor version.
 - `index.json` is additive. Older entries without new fields are valid; missing fields
   get zero values.
 - The normalization config schema is additive. New transform types added in later
@@ -589,8 +606,19 @@ Rules:
 
 ## Migration Path from wand-python
 
-The proxy is designed so that existing `msmt` tests and fixtures require no changes.
-The migration is purely in the infrastructure layer.
+The proxy is designed so that existing `msmt` **tests** require no changes. The
+migration is in the infrastructure layer, with one deliberate exception: fixtures are
+**regenerated once** into the v1 JSON format (see
+[Stability and Versioning](#stability-and-versioning) for why the old formats are not
+read directly).
+
+### Step 0 — Regenerate fixtures into v1 format
+
+With live service access, run a `capture` pass to rewrite the existing
+`__fixtures__/snowflake/` and `__fixtures__/hermes/` sets in the v1 JSON format. This
+is a one-time cost per service. After this, `ci` mode runs offline as before. The
+original `.sql` / `.df` / `.pbb` files can be deleted once the JSON fixtures are
+committed and CI is green.
 
 ### Step 1 — Run proxy alongside existing system
 
@@ -600,11 +628,13 @@ and stops cleanly in your CI environment.
 ### Step 2 — Slim down mockflake.py
 
 Replace fixture logic in `mockflake.py` with a redirect to the proxy (see shim in
-`shims/python/mockflake.py`). Existing `__fixtures__/snowflake/` files are unchanged.
+`shims/python/mockflake.py`). The shim serializes the SQL call to JSON for the proxy;
+the v1 fixtures written in Step 0 back it.
 
 ### Step 3 — Slim down mockhermes.py
 
-Same treatment. Existing `__fixtures__/hermes/` files are unchanged.
+Same treatment. The shim serializes the proto request to JSON; the regenerated v1
+Hermes fixtures back it.
 
 ### Step 4 — Simplify mocking.py
 
@@ -619,15 +649,20 @@ sidecar. The `MOCKFLAKE_MODE` env var is replaced by `WAND_MODE`.
 
 ### Step 6 — Generate index.json
 
-Run `wand explain` across existing fixtures to backfill `index.json`. This is not
-required for `ci` mode to work — it's for developer experience.
+Run `wand explain` across the regenerated fixtures to backfill `index.json`. This is
+not required for `ci` mode to work — it's for developer experience.
 
 ### What does not change
 
-- `__fixtures__/` directory structure and file naming
-- Individual fixture file contents
+- `__fixtures__/` directory structure and hash-based file naming (the hash algorithm
+  is unchanged; only the payload encoding and file extension change)
 - Test files (they still import `Mockflake`, still use the same fixture paths)
 - CI configuration (same env var pattern, same `pytest` invocation)
+
+### What does change
+
+- Fixture bodies are re-encoded as JSON (with a version header) and the `_req` / `_resp`
+  files become `.json`, regenerated once via `capture` (Step 0)
 
 ---
 

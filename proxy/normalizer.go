@@ -130,14 +130,108 @@ func candidateDirs() []string {
 
 func applyPatterns(payload any, patterns []Pattern) any {
 	for _, pattern := range patterns {
-		switch pattern.Transform {
-		case "strip_version_suffix":
-			payload = transformValue(payload, stripVersionSuffix)
-		case "normalize_timestamps":
-			payload = transformValue(payload, normalizeTimestamps)
+		fn := transformFor(pattern.Transform)
+		if fn == nil {
+			// Unknown transform: ignore rather than crash, so newer configs
+			// stay readable by older proxy versions (additive schema rule).
+			continue
 		}
+		// Scope the transform to its configured location instead of rewriting
+		// every string in the payload — applying broadly risks corrupting
+		// unrelated fields and causing fixture collisions.
+		applyAtLocation(payload, pattern.Location, fn)
 	}
 	return payload
+}
+
+func transformFor(name string) func(string) string {
+	switch name {
+	case "strip_version_suffix":
+		return stripVersionSuffix
+	case "normalize_timestamps":
+		return normalizeTimestamps
+	default:
+		return nil
+	}
+}
+
+// pathSeg is one step in a normalization location: either a named object field
+// or a [*] wildcard that iterates every element of an array.
+type pathSeg struct {
+	field string
+	wild  bool
+}
+
+// parseLocation understands two forms:
+//   - a bare top-level field name ("sql", "body")
+//   - a limited JSONPath ("$.results[*].dbName", "$.hits.hits[*]._index")
+//     supporting object fields and [*] array wildcards.
+func parseLocation(location string) []pathSeg {
+	loc := strings.TrimPrefix(location, "$")
+	loc = strings.TrimPrefix(loc, ".")
+	if loc == "" {
+		return nil
+	}
+	var segs []pathSeg
+	for _, part := range strings.Split(loc, ".") {
+		name := part
+		wilds := 0
+		for strings.HasSuffix(name, "[*]") {
+			name = strings.TrimSuffix(name, "[*]")
+			wilds++
+		}
+		if name != "" {
+			segs = append(segs, pathSeg{field: name})
+		}
+		for i := 0; i < wilds; i++ {
+			segs = append(segs, pathSeg{wild: true})
+		}
+	}
+	return segs
+}
+
+func applyAtLocation(node any, location string, fn func(string) string) {
+	segs := parseLocation(location)
+	if len(segs) == 0 {
+		return
+	}
+	applyPath(node, segs, fn)
+}
+
+// applyPath walks segs into node and applies fn to the string(s) at the target.
+// When the target subtree is not a bare string (e.g. location "body" points at
+// an object), transformValue applies fn to every string within just that
+// subtree, leaving the rest of the payload untouched.
+func applyPath(node any, segs []pathSeg, fn func(string) string) {
+	seg := segs[0]
+	rest := segs[1:]
+	if seg.wild {
+		arr, ok := node.([]any)
+		if !ok {
+			return
+		}
+		for i := range arr {
+			if len(rest) == 0 {
+				arr[i] = transformValue(arr[i], fn)
+			} else {
+				applyPath(arr[i], rest, fn)
+			}
+		}
+		return
+	}
+	obj, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	child, exists := obj[seg.field]
+	if !exists {
+		return
+	}
+	if len(rest) == 0 {
+		obj[seg.field] = transformValue(child, fn)
+	} else {
+		applyPath(child, rest, fn)
+	}
 }
 
 func transformValue(value any, fn func(string) string) any {

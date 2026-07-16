@@ -2,11 +2,9 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -103,7 +101,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write(resp)
-	case "LIVE_TEST", " LIVETEST":
+	case "LIVETEST", "LIVE_TEST":
 		upstream, err := s.resolveUpstream(service)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -197,9 +195,4 @@ func serviceFromRequest(r *http.Request) string {
 		return strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	}
 	return ""
-}
-
-func init() {
-	_ = httputil.DumpRequestOut
-	_ = json.Marshal
 }
