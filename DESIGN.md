@@ -26,8 +26,7 @@
 ## Origin and Motivation
 
 `wand` grew out of a pattern first documented for Elasticsearch testing (2018) and later
-evolved into a production Python library (`msmt`) used at CrossScreen Media to mock
-Snowflake and Hermes/gRPC calls in CI.
+evolved into a Python library.
 
 The original Python implementation (`mocking.py`, `mockflake.py`, `mockhermes.py`)
 works by intercepting calls at the Python process level using `monkeypatch` and
