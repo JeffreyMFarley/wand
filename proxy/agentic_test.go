@@ -56,10 +56,3 @@ func TestFirstLineTrimsQuotes(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
-
-func TestSplitList(t *testing.T) {
-	got := splitList("a, b ,,c")
-	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
-		t.Fatalf("got %#v", got)
-	}
-}

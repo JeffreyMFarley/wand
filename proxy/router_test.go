@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,14 +14,13 @@ func TestRouterRunSupportsScaffoldedCommands(t *testing.T) {
 		checkFile string
 	}{
 		// Only offline, deterministic commands belong here. The Claude-powered
-		// commands (capture <description>, diff --pr, explain, scaffold) do real
+		// commands (capture <file-or-dir>, diff --pr, explain, scaffold) do real
 		// work needing credentials or fixtures and are covered by helper unit
 		// tests plus manual end-to-end runs instead.
 		{name: "init", args: []string{"init"}, checkFile: "wand.yaml"},
 		{name: "help", args: []string{"help"}},
 		{name: "proxy start", args: []string{"proxy", "start"}},
 		{name: "proxy stop", args: []string{"proxy", "stop"}},
-		{name: "capture tests", args: []string{"capture", "--tests", "test_report.py"}},
 		{name: "diff", args: []string{"diff"}},
 		{name: "doctor", args: []string{"doctor"}},
 		{name: "verify", args: []string{"verify"}},
@@ -133,4 +133,63 @@ func TestRunInitInstallsPythonShims(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveCaptureTargets(t *testing.T) {
+	d := t.TempDir()
+	mk := func(rel string) {
+		p := filepath.Join(d, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(""), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	mk("tests/test_foo.py")               // test file
+	mk("tests/helper.py")                 // not a test file — excluded
+	mk("tests/sub/test_bar.py")           // nested test file
+	mk("tests/node_modules/test_skip.py") // vendored tree — skipped
+	mk("main.go")                         // not a test file
+
+	t.Chdir(d)
+
+	t.Run("directory walks to test files only", func(t *testing.T) {
+		got, err := resolveCaptureTargets([]string{"tests"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{
+			filepath.Join("tests", "test_foo.py"):        true,
+			filepath.Join("tests", "sub", "test_bar.py"): true,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want the %d files in %v", got, len(want), want)
+		}
+		for _, g := range got {
+			if !want[g] {
+				t.Errorf("unexpected resolved file %q", g)
+			}
+		}
+	})
+
+	t.Run("explicit non-test file passes through", func(t *testing.T) {
+		got, err := resolveCaptureTargets([]string{"main.go"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != "main.go" {
+			t.Fatalf("got %v, want [main.go]", got)
+		}
+	})
+
+	t.Run("missing path errors and names the path", func(t *testing.T) {
+		_, err := resolveCaptureTargets([]string{"tests", "does_not_exist.py"})
+		if err == nil {
+			t.Fatal("expected an error for a missing path, got nil")
+		}
+		if !strings.Contains(err.Error(), "does_not_exist.py") {
+			t.Errorf("error should name the missing path, got: %v", err)
+		}
+	})
 }

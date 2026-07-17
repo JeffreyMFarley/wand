@@ -409,8 +409,9 @@ wand proxy start                       Start the proxy sidecar
 wand proxy stop                        Stop the proxy sidecar
 wand proxy status                      Show mode, port, loaded service configs
 
-wand capture [description]             Agentic: Claude resolves scope, runs capture
-wand capture --tests <test_ids>        Explicit scope, no Claude needed
+wand capture <file-or-dir>...          Explicit scope: test files, or dirs walked to test files
+wand capture --from-diff [description]  Agentic escape hatch: Claude infers scope from the git diff
+wand capture --name                    Name captured fixtures (post-capture, Claude)
 wand diff                              Semantic diff of changed fixtures (git diff)
 wand diff --pr <number>                Semantic diff of fixtures changed in a PR
 wand doctor                            livetest all fixtures, classify divergences

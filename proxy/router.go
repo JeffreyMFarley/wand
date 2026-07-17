@@ -32,8 +32,8 @@ Usage:
 Commands:
   init                        Scaffold wand.yaml and install shims for detected languages
   proxy start|stop            Start or stop the proxy sidecar
-  capture [description]       Claude resolves which tests to capture from the git diff
-  capture --tests <ids>       Print the capture command for an explicit set of tests
+  capture <file-or-dir>...    Print the capture command for the given test files/dirs
+  capture --from-diff [desc]  Claude infers the capture scope from the git diff
   capture --name              Name captured fixtures and update index.json (post-capture)
   diff [--pr <number>]        Semantic diff of changed fixtures (Claude summary)
   doctor                      livetest all fixtures and classify divergences

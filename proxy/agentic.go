@@ -33,8 +33,8 @@ const (
 		"Output the suggested file path on the first line as `path: <relative/path>`, then a blank line, " +
 		"then only the test source code. Do not wrap the code in markdown fences."
 
-	// capture <description>: pick which existing tests to re-capture.
-	captureScopeSystemPrompt = "You identify which existing tests exercise changed code paths so their fixtures can be " +
+	// capture --from-diff: infer which tests to re-capture from the git diff.
+	captureFromDiffSystemPrompt = "You identify which existing tests exercise changed code paths so their fixtures can be " +
 		"re-captured. Respond ONLY with a JSON array of test identifiers " +
 		"(e.g. [\"tests/test_report.py::test_authors\"]). Prefer a small, precise set."
 
@@ -117,39 +117,105 @@ func (r *Router) runScaffold(args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// capture — scope resolution + post-capture scenario naming
+// capture — resolve explicit file/directory targets + post-capture naming
 // ---------------------------------------------------------------------------
 
 func (r *Router) runCapture(args []string) error {
-	switch {
-	case len(args) >= 1 && args[0] == "--tests":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: wand capture --tests <test_ids>")
-		}
-		printCaptureInstructions(splitList(args[1]))
-		return nil
-
-	case len(args) >= 1 && args[0] == "--name":
+	if len(args) >= 1 && args[0] == "--name" {
 		return r.captureName()
-
-	case len(args) == 0:
-		return fmt.Errorf("usage: wand capture <description> | --tests <ids> | --name")
-
-	default:
-		return r.captureScope(strings.Join(args, " "))
 	}
+	if len(args) >= 1 && args[0] == "--from-diff" {
+		return r.captureFromDiff(strings.Join(args[1:], " "))
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("usage: wand capture <file-or-dir>... | --from-diff [description] | --name")
+	}
+
+	files, err := resolveCaptureTargets(args)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		fmt.Println("no test files found in the given paths")
+		return nil
+	}
+	printCaptureInstructions(files)
+	return nil
 }
 
-// captureScope asks Claude which tests exercise the changed code, then (on
-// confirmation) prints the capture command for that scope. It never captures
-// blindly — scope creep produces large, unreviewable fixture commits.
-func (r *Router) captureScope(desc string) error {
+// resolveCaptureTargets validates each path and expands directories into the
+// test files they contain. Explicit file arguments are taken as-is; directories
+// are walked and filtered to recognized test files (skipping vendored/generated
+// trees). It errors if any path does not exist, so a typo never silently
+// captures nothing.
+func resolveCaptureTargets(paths []string) ([]string, error) {
+	var files, missing []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		p = filepath.Clean(p)
+		if !seen[p] {
+			seen[p] = true
+			files = append(files, p)
+		}
+	}
+
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			missing = append(missing, p)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			add(p) // explicit file — taken as given, even if unusual
+			continue
+		}
+		walkErr := filepath.WalkDir(p, func(wp string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				switch d.Name() {
+				case ".git", "node_modules", "vendor", "__fixtures__", "dist", "build":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if isTestFile(d.Name()) {
+				add(wp)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("path(s) not found: %s", strings.Join(missing, ", "))
+	}
+	return files, nil
+}
+
+// captureFromDiff is the agentic escape hatch: instead of naming files
+// explicitly, Claude reads the working-tree diff (plus an optional description)
+// and proposes which existing tests exercise the changed code. It never
+// captures blindly — the developer confirms the proposed scope first, since
+// scope creep produces large, unreviewable fixture commits.
+func (r *Router) captureFromDiff(desc string) error {
 	diff, _ := codeDiff()
+	if strings.TrimSpace(diff) == "" {
+		fmt.Println("no working-tree changes detected; nothing to infer a capture scope from")
+		return nil
+	}
 	index, _ := NewStore().LoadIndex()
 
-	system := captureScopeSystemPrompt
 	var b strings.Builder
-	fmt.Fprintf(&b, "Change description: %s\n\n", desc)
+	if desc != "" {
+		fmt.Fprintf(&b, "Change description: %s\n\n", desc)
+	}
 	if len(index) > 0 {
 		b.WriteString("Known fixtures (hash → tests that use them):\n")
 		for h, e := range index {
@@ -159,7 +225,7 @@ func (r *Router) captureScope(desc string) error {
 	}
 	fmt.Fprintf(&b, "Git diff:\n%s\n", truncateStr(diff, 8000))
 
-	out, err := NewClaudeClient().Complete(context.Background(), system, b.String())
+	out, err := NewClaudeClient().Complete(context.Background(), captureFromDiffSystemPrompt, b.String())
 	if err != nil {
 		return err
 	}
@@ -426,6 +492,18 @@ func stripFences(s string) string {
 	return strings.TrimSpace(s)
 }
 
+func printCaptureInstructions(targets []string) {
+	fmt.Println("Capture scope:")
+	for _, t := range targets {
+		fmt.Printf("  - %s\n", t)
+	}
+	fmt.Println("\nRun your test suite in capture mode to record fixtures, e.g.:")
+	fmt.Printf("  WAND_MODE=capture <your test runner> %s\n", strings.Join(targets, " "))
+	fmt.Println("Then name the captured fixtures:  wand capture --name")
+}
+
+// parseTestList extracts a list of test identifiers from Claude's response,
+// preferring an embedded JSON array and falling back to one-per-line bullets.
 func parseTestList(s string) []string {
 	s = stripFences(s)
 	if start, end := strings.Index(s, "["), strings.LastIndex(s, "]"); start >= 0 && end > start {
@@ -435,33 +513,13 @@ func parseTestList(s string) []string {
 		}
 	}
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(strings.TrimLeft(line, "-*• "))
 		if line != "" {
 			out = append(out, line)
 		}
 	}
 	return out
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
-func printCaptureInstructions(tests []string) {
-	fmt.Println("Capture scope:")
-	for _, t := range tests {
-		fmt.Printf("  - %s\n", t)
-	}
-	fmt.Println("\nRun your test suite in capture mode to record fixtures, e.g.:")
-	fmt.Printf("  WAND_MODE=capture <your test runner> %s\n", strings.Join(tests, " "))
-	fmt.Println("Then name the captured fixtures:  wand capture --name")
 }
 
 func confirm(prompt string) bool {
