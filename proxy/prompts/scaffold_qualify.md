@@ -47,6 +47,14 @@ the parent or mixin is the test subject.
 
 ---
 
+## God function rule
+
+A function or method exceeding **400 lines** that contains at least one qualifying
+external call anywhere in its body qualifies the file automatically, regardless of
+how deeply the call is nested in conditionals or loops. Do not require the call to
+be at the top level of the function. Count lines excluding blank lines and comments
+
+
 ## Do NOT qualify on any of the following
 
 - Dispatch, emit, or pub/sub calls within the same process (Redux dispatch,

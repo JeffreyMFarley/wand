@@ -53,6 +53,11 @@ If the class has a method that drives population of internal state (e.g. `scan()
 properties are assertable after setup. Each sub-call is a candidate for at least
 one assertion.
 
+If the qualifying subject is a god function (a single function exceeding 400 lines),
+write a single test that exercises the entire function end to end and asserts only
+on the final return value — that test will pass even when an interior phase is broken.
+The intention is to use these tests to break down god functions
+
 ---
 
 ## Step 4 — Identify option flags and conditional paths
