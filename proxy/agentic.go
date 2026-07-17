@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -121,6 +122,191 @@ func (r *Router) runScaffold(args []string) error {
 	return nil
 }
 
+// scaffoldUserMessage builds the per-file user message shared by the qualify
+// and write scaffold calls: the source path plus its (truncated) contents.
+func scaffoldUserMessage(src string, data []byte) string {
+	return fmt.Sprintf("Source file: %s\n\n%s\n", src, truncateStr(string(data), 12000))
+}
+
+// completer is the slice of ClaudeClient the scaffold/scan flows depend on.
+// Narrowing to an interface lets tests substitute a stub verdict source without
+// real API calls or credentials.
+type completer interface {
+	Complete(ctx context.Context, system, user string) (string, error)
+}
+
+// qualifyForTest runs the cheap classification call for one source file,
+// reporting whether it warrants an integration test and, when it does not, the
+// one-line reason from the prompt. Shared by `wand scan` and `wand scaffold` so
+// both classify identically.
+func qualifyForTest(client completer, user string) (qualifies bool, reason string, err error) {
+	verdict, err := client.Complete(context.Background(), scaffoldQualifySystemPrompt, user)
+	if err != nil {
+		return false, "", err
+	}
+	if reason, skip := noIntegrationTest(verdict); skip {
+		return false, reason, nil
+	}
+	return true, "", nil
+}
+
+// ---------------------------------------------------------------------------
+// scan — report which source files would get tests, without generating any
+// ---------------------------------------------------------------------------
+
+// runScan classifies each source file with the qualify prompt and prints a
+// report of what `wand scaffold` would do, generating nothing. It's the
+// read-only preview of a scaffold sweep: which files qualify, where their tests
+// would land, and which already have one.
+func (r *Router) runScan(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: wand scan <file-or-dir>...")
+	}
+	sources, err := resolveSourceTargets(args)
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		fmt.Println("no source files found in the given paths")
+		return nil
+	}
+
+	client := NewClaudeClient()
+	fmt.Printf("scanning %d source file(s) with %s...\n", len(sources), client.Model())
+
+	// Live counter, overwritten in place, so a long sweep shows progress
+	// instead of appearing hung. Results land out of order (concurrent), so a
+	// running count is clearer than per-file lines.
+	results, err := scanSources(client, sources, func(done, total int, _ scanClassification) {
+		fmt.Printf("\r  %d/%d scanned", done, total)
+	})
+	fmt.Println() // finish the progress line before the report (or an error)
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+
+	var qualifying, existing, skipped []string
+	for _, res := range results {
+		switch {
+		case !res.qualifies:
+			skipped = append(skipped, fmt.Sprintf("  %s: %s", res.src, res.reason))
+		case res.exists:
+			existing = append(existing, fmt.Sprintf("  %s -> %s", res.src, res.dest))
+		default:
+			qualifying = append(qualifying, fmt.Sprintf("  %s -> %s", res.src, res.dest))
+		}
+	}
+
+	if len(qualifying) > 0 {
+		fmt.Printf("WOULD GENERATE (%d):\n%s\n\n", len(qualifying), strings.Join(qualifying, "\n"))
+	}
+	if len(existing) > 0 {
+		fmt.Printf("QUALIFIES, TEST ALREADY EXISTS (%d):\n%s\n\n", len(existing), strings.Join(existing, "\n"))
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("SKIP (%d):\n%s\n\n", len(skipped), strings.Join(skipped, "\n"))
+	}
+
+	fmt.Printf("scan complete: %d would get tests, %d already have one, %d skipped\n",
+		len(qualifying), len(existing), len(skipped))
+	if len(qualifying) > 0 {
+		fmt.Println("Run 'wand scaffold <paths>' to generate them.")
+	}
+	return nil
+}
+
+// scanClassification is one source file's verdict from a scan sweep.
+type scanClassification struct {
+	src       string
+	qualifies bool
+	reason    string // why it was skipped, when !qualifies
+	dest      string // where the test would land, when qualifies
+	exists    bool   // whether that test file already exists, when qualifies
+}
+
+// scanConcurrency bounds how many qualify calls are in flight at once. A scan of
+// a large tree is otherwise one sequential API round-trip per file, which is far
+// too slow; a small pool keeps it well within the API's rate limits while
+// cutting wall-clock time by roughly this factor.
+const scanConcurrency = 8
+
+// classifyForScan runs the qualify call for one source file and records where
+// its test would land and whether one already exists. Only I/O and API errors
+// are returned; a file that doesn't qualify, or one whose extension has no
+// test-path convention, comes back as a non-qualifying result with a reason
+// (mirroring scaffold's per-file tolerance).
+func classifyForScan(client completer, src string) (scanClassification, error) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return scanClassification{}, err
+	}
+	qualifies, reason, err := qualifyForTest(client, scaffoldUserMessage(src, data))
+	if err != nil {
+		return scanClassification{}, err
+	}
+	res := scanClassification{src: src, qualifies: qualifies, reason: reason}
+	if qualifies {
+		dest, err := testPathFor(src)
+		if err != nil {
+			// Unsupported extension (only reachable via an explicit file
+			// arg): report it as a skip rather than a qualifying test.
+			res.qualifies = false
+			res.reason = err.Error()
+		} else {
+			res.dest = dest
+			if _, statErr := os.Stat(dest); statErr == nil {
+				res.exists = true
+			}
+		}
+	}
+	return res, nil
+}
+
+// scanSources classifies every source file, generating nothing. Files are
+// classified concurrently (bounded by scanConcurrency) since each is an
+// independent API round-trip, but the returned slice preserves input order.
+// progress, if non-nil, is called once per completed file with a running done
+// count and the file's result; it is serialized, so it may print freely. The
+// first I/O or API error aborts the sweep and is returned.
+func scanSources(client completer, sources []string, progress func(done, total int, res scanClassification)) ([]scanClassification, error) {
+	results := make([]scanClassification, len(sources))
+	errs := make([]error, len(sources))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	done := 0
+	sem := make(chan struct{}, scanConcurrency)
+
+	for i, src := range sources {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, src string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			res, err := classifyForScan(client, src)
+			results[i] = res
+			errs[i] = err
+
+			mu.Lock()
+			done++
+			if progress != nil {
+				progress(done, len(sources), res)
+			}
+			mu.Unlock()
+		}(i, src)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}
+
 // scaffoldOne generates a single integration test for one source file. It
 // reports whether a test file was written (false = skipped, either because the
 // file doesn't qualify per the prompt or a test already exists). Only I/O and
@@ -142,16 +328,16 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 		return false, nil
 	}
 
-	user := fmt.Sprintf("Source file: %s\n\n%s\n", src, truncateStr(string(data), 12000))
+	user := scaffoldUserMessage(src, data)
 
 	// Qualify first: a cheap classification call decides whether the file
 	// warrants an integration test at all. If it doesn't, skip without paying
 	// for the (much larger) generation call.
-	verdict, err := client.Complete(context.Background(), scaffoldQualifySystemPrompt, user)
+	qualifies, reason, err := qualifyForTest(client, user)
 	if err != nil {
 		return false, err
 	}
-	if reason, skip := noIntegrationTest(verdict); skip {
+	if !qualifies {
 		fmt.Printf("skipped %s: %s\n", src, reason)
 		return false, nil
 	}

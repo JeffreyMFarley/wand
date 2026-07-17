@@ -1,9 +1,31 @@
 package proxy
 
 import (
+	"context"
+	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 )
+
+// stubCompleter stands in for ClaudeClient in scan/scaffold tests: it returns a
+// canned verdict per source path (matched against the "Source file: <path>"
+// header in the user message) so no real API call is made. Unlisted files
+// default to qualifying.
+type stubCompleter struct {
+	verdicts map[string]string // src path -> Complete() response
+}
+
+func (s stubCompleter) Complete(_ context.Context, _, user string) (string, error) {
+	for src, verdict := range s.verdicts {
+		if strings.Contains(user, "Source file: "+src+"\n") {
+			return verdict, nil
+		}
+	}
+	return "QUALIFIES", nil
+}
 
 func TestTestPathFor(t *testing.T) {
 	cases := []struct {
@@ -122,5 +144,98 @@ func TestStripFences(t *testing.T) {
 		if got := stripFences(c.in); got != c.want {
 			t.Fatalf("%s: stripFences(%q) = %q, want %q", name, c.in, got, c.want)
 		}
+	}
+}
+
+func TestScanSources(t *testing.T) {
+	d := t.TempDir()
+	mk := func(rel, content string) {
+		p := filepath.Join(d, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	// Source files under scan. Content is irrelevant — the stub keys off path.
+	mk("svc.py", "import requests\n") // qualifies, no test yet
+	mk("data.py", "x = 1\n")          // does not qualify
+	mk("cached.py", "import httpx\n") // qualifies, but a test already exists
+	mk("notes.md", "# docs\n")        // qualifies per stub, but no test-path convention
+	// Pre-existing test for cached.py: testPathFor("cached.py") -> tests/test_cached.py
+	mk(filepath.Join("tests", "test_cached.py"), "# existing\n")
+
+	t.Chdir(d)
+
+	client := stubCompleter{verdicts: map[string]string{
+		"data.py": "No integration test. Pure data container",
+	}}
+
+	order := []string{"svc.py", "data.py", "cached.py", "notes.md"}
+
+	// Track progress callbacks: it must fire once per file with a monotonically
+	// increasing done count. Guarded because scanSources classifies concurrently.
+	var mu sync.Mutex
+	var counts []int
+	progress := func(done, total int, _ scanClassification) {
+		mu.Lock()
+		defer mu.Unlock()
+		if total != len(order) {
+			t.Errorf("progress total = %d, want %d", total, len(order))
+		}
+		counts = append(counts, done)
+	}
+
+	results, err := scanSources(client, order, progress)
+	if err != nil {
+		t.Fatalf("scanSources error: %v", err)
+	}
+
+	// One callback per file, counting 1..N regardless of completion order.
+	if len(counts) != len(order) {
+		t.Errorf("progress fired %d times, want %d", len(counts), len(order))
+	}
+	sort.Ints(counts)
+	for i, c := range counts {
+		if c != i+1 {
+			t.Errorf("progress counts = %v, want 1..%d", counts, len(order))
+			break
+		}
+	}
+
+	// Results preserve input order even though classification is concurrent.
+	for i, r := range results {
+		if r.src != order[i] {
+			t.Errorf("results[%d].src = %q, want %q (input order not preserved)", i, r.src, order[i])
+		}
+	}
+
+	bySrc := map[string]scanClassification{}
+	for _, r := range results {
+		bySrc[r.src] = r
+	}
+	if len(bySrc) != 4 {
+		t.Fatalf("expected 4 classifications, got %d: %+v", len(bySrc), results)
+	}
+
+	// svc.py: qualifies, no existing test.
+	if got := bySrc["svc.py"]; !got.qualifies || got.exists ||
+		got.dest != filepath.Join("tests", "test_svc.py") {
+		t.Errorf("svc.py = %+v, want qualifies, !exists, dest tests/test_svc.py", got)
+	}
+	// data.py: does not qualify, reason carried through from the prompt.
+	if got := bySrc["data.py"]; got.qualifies || got.reason != "Pure data container" {
+		t.Errorf("data.py = %+v, want !qualifies with reason 'Pure data container'", got)
+	}
+	// cached.py: qualifies but the test already exists.
+	if got := bySrc["cached.py"]; !got.qualifies || !got.exists {
+		t.Errorf("cached.py = %+v, want qualifies and exists", got)
+	}
+	// notes.md: qualifies per stub, but no test-path convention -> skipped.
+	if got := bySrc["notes.md"]; got.qualifies {
+		t.Errorf("notes.md = %+v, want !qualifies (unsupported extension)", got)
+	} else if !strings.Contains(got.reason, "unsupported") {
+		t.Errorf("notes.md reason = %q, want it to mention 'unsupported'", got.reason)
 	}
 }

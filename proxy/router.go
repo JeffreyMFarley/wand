@@ -39,6 +39,7 @@ Commands:
   doctor                      livetest all fixtures and classify divergences
   verify                      ci-mode dry run; report any fixture misses
   explain <hash>              Describe what scenario a fixture covers
+  scan <file-or-dir>...       Report which source files would get tests (generates nothing)
   scaffold <file-or-dir>...   Generate integration tests for the given source files/dirs
   normalizer                  Run normalization discovery/checks
   help                        Show this help
@@ -73,6 +74,8 @@ func (r *Router) Run(args []string) error {
 		return r.runDoctor(remaining)
 	case "explain":
 		return r.runExplain(remaining)
+	case "scan":
+		return r.runScan(remaining)
 	case "scaffold":
 		return r.runScaffold(remaining)
 	case "verify":
