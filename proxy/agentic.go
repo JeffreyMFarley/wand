@@ -29,9 +29,14 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	// scaffold: generate one new test in the repo's style.
-	//go:embed prompts/scaffold.md
-	scaffoldSystemPrompt string
+	// scaffold runs as two calls: a cheap qualify check decides whether a source
+	// file warrants an integration test, and only then does the write step
+	// generate one — so non-qualifying files never pay for generation.
+	//go:embed prompts/scaffold_qualify.md
+	scaffoldQualifySystemPrompt string
+
+	//go:embed prompts/scaffold_write.md
+	scaffoldWriteSystemPrompt string
 
 	// capture --from-diff: infer which tests to re-capture from the git diff.
 	//go:embed prompts/capture_from_diff.md
@@ -63,7 +68,8 @@ var (
 // which we don't want leaking into system/user messages.
 func init() {
 	for _, p := range []*string{
-		&scaffoldSystemPrompt,
+		&scaffoldQualifySystemPrompt,
+		&scaffoldWriteSystemPrompt,
 		&captureFromDiffSystemPrompt,
 		&captureNameSystemPrompt,
 		&diffSystemPrompt,
@@ -137,11 +143,26 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 	}
 
 	user := fmt.Sprintf("Source file: %s\n\n%s\n", src, truncateStr(string(data), 12000))
-	out, err := client.Complete(context.Background(), scaffoldSystemPrompt, user)
+
+	// Qualify first: a cheap classification call decides whether the file
+	// warrants an integration test at all. If it doesn't, skip without paying
+	// for the (much larger) generation call.
+	verdict, err := client.Complete(context.Background(), scaffoldQualifySystemPrompt, user)
 	if err != nil {
 		return false, err
 	}
+	if reason, skip := noIntegrationTest(verdict); skip {
+		fmt.Printf("skipped %s: %s\n", src, reason)
+		return false, nil
+	}
 
+	// Qualified: generate the test file. The write prompt keeps the same
+	// "No integration test." escape hatch in case a closer reading finds no
+	// directly-qualifying subject after all.
+	out, err := client.Complete(context.Background(), scaffoldWriteSystemPrompt, user)
+	if err != nil {
+		return false, err
+	}
 	if reason, skip := noIntegrationTest(out); skip {
 		fmt.Printf("skipped %s: %s\n", src, reason)
 		return false, nil
