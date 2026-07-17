@@ -69,7 +69,8 @@ a second fixture with different options.
 ### Structure
 
 Always produce a `unittest.TestCase` class (Python), a `testing.T`-based test
-file (Go), or a `describe`/`beforeAll` block (Node/Jest). Never produce bare
+file (Go), a `describe`/`beforeAll` block (Node/Jest), a `PHPUnit\Framework\TestCase`
+subclass (Laravel/PHP), or an RSpec `describe` block (Ruby). Never produce bare
 test functions at module level.
 
 Use the following setup/teardown pattern:
@@ -113,6 +114,52 @@ afterAll(async () => {
 
 beforeEach(() => { /* per-test setup */ })
 afterEach(() => { /* per-test teardown */ })
+```
+
+**Laravel / PHP**
+```php
+public static function setUpBeforeClass(): void
+{
+    // Runs once. Boot the real application container if needed.
+    // Instantiate the class under test and run any scan/load method.
+    // Store results in static properties for use in all test methods.
+}
+
+public static function tearDownAfterClass(): void
+{
+    // Release class-level resources if needed. Often empty.
+}
+
+protected function setUp(): void
+{
+    // Runs before each test. Per-test state (temp files, streams).
+}
+
+protected function tearDown(): void
+{
+    // Runs after each test. Clean up per-test state.
+}
+```
+
+**Ruby / RSpec**
+```ruby
+before(:all) do
+  # Runs once. Create the real client/connection here.
+  # Instantiate the class under test and call any scan/load method.
+  # Store results in @instance variables for use across examples.
+end
+
+after(:all) do
+  # Release class-level resources if needed.
+end
+
+before(:each) do
+  # Per-test setup (temp dirs, IO objects).
+end
+
+after(:each) do
+  # Per-test cleanup.
+end
 ```
 
 ### What to assert
@@ -178,20 +225,28 @@ speculatively.
   assert one distinct behavior.
 - Do not stack multiple unrelated assertions in a single test method.
 - Do not write a test that will always pass regardless of the system under test.
+- In Ruby, do not test methods inherited from a base class or mixed in from a
+  module unless those methods are the primary external call surface for the class
+  under test.
 
 ---
 
 ## Output format
 
-Produce exactly one file. The file should be named `test_<source_file_name>` in
-Python, `<source_file_name>_test.go` in Go, or `<source_file_name>.test.js` in
-Node. Include a brief comment block at the top identifying it as an integration
-test and noting that mocking is handled externally.
+Produce exactly one file. Name it as follows by language:
+- Python: `test_<source_file_name>.py`
+- Go: `<source_file_name>_test.go`
+- Node: `<source_file_name>.test.js`
+- PHP: `<source_file_name>Test.php`
+- Ruby: `<source_file_name>_spec.rb`
+
+Include a brief comment block at the top identifying it as an integration test
+and noting that mocking is handled externally.
 
 Work through Steps 1–7 silently. Your entire response must be **only** the file,
-wrapped in a single fenced code block (```python / ```go / ```js) and nothing
-else — no preamble, no step-by-step reasoning, no explanation before or after
-the fence. The one exception is a file that on closer reading has no qualifying
-subject, where you output the following line instead of a code block:
+wrapped in a single fenced code block (```python / ```go / ```js / ```php / ```ruby)
+and nothing else — no preamble, no step-by-step reasoning, no explanation before
+or after the fence. The one exception is a file that on closer reading has no
+qualifying subject, where you output the following line instead of a code block:
 
 > No integration test. [One sentence explaining why.]

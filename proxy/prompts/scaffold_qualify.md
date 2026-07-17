@@ -29,6 +29,22 @@ Triggers: `fetch`, `axios`, `http`/`https` (Node core), `aws-sdk`/`@aws-sdk`,
 database clients (`pg`, `mysql2`, `mongoose`, `redis`), `opensearch-js`, or any
 GraphQL client that makes a network call.
 
+**Laravel / PHP**
+Triggers: `DB` facade, `Http` facade, Eloquent models with an active database
+connection, `Redis` facade, `Storage` facade targeting a remote driver (S3, etc.),
+`GuzzleHttp\Client`, any AWS SDK client (`Aws\S3\S3Client`, etc.), or any
+third-party SDK client that opens a network connection.
+
+**Ruby**
+Triggers: `aws-sdk-ruby` (any `Aws::*::Client`), `faraday`, `httparty`, `net/http`,
+`ActiveRecord` (with a live database connection), `redis`, `mongo`,
+`Elasticsearch::Client`, or any third-party gem client initialized with a connection
+string or credentials. **Also scan included modules and inherited methods** — external
+calls in a mixed-in module or base class count the same as calls defined directly on
+the class. However, if the only external calls are in a parent class or mixin and the
+class under test adds no external calls of its own, the class itself does not qualify —
+the parent or mixin is the test subject.
+
 ---
 
 ## Do NOT qualify on any of the following
