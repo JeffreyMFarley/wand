@@ -118,10 +118,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, fixtureResp, readErr := s.Store.Read(service, hash)
-		if readErr == nil {
-			if !bytes.Equal(normalizedResp, fixtureResp) {
-				fmt.Printf("livetest mismatch for %s: live=%s fixture=%s\n", service, normalizedResp, fixtureResp)
-			}
+		if readErr == nil && !bytes.Equal(normalizedResp, fixtureResp) {
+			fmt.Printf("livetest mismatch for %s (%s)\n", service, hash)
+			// Record it so `wand doctor` can classify the divergence later.
+			_ = s.Store.AppendDivergence(Divergence{
+				Service: service,
+				Hash:    hash,
+				Live:    string(normalizedResp),
+				Fixture: string(fixtureResp),
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(resp)

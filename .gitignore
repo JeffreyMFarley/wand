@@ -1,1 +1,4 @@
 *.zip
+
+# Transient livetest divergences (input to `wand doctor`, not a fixture)
+__fixtures__/livetest_divergences.json

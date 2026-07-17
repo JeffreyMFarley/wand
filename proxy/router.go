@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"wand/shims"
 )
 
 // Config holds basic routing settings for the CLI entry points.
@@ -28,11 +30,12 @@ Usage:
   wand <command> [args]
 
 Commands:
-  init                        Scaffold wand.yaml for this project
+  init                        Scaffold wand.yaml and install shims for detected languages
   proxy start|stop            Start or stop the proxy sidecar
-  capture [description]       Capture fixtures (Claude resolves scope from description)
-  capture --tests <ids>       Capture fixtures for an explicit set of tests
-  diff [--pr <number>]        Semantic diff of changed fixtures
+  capture [description]       Claude resolves which tests to capture from the git diff
+  capture --tests <ids>       Print the capture command for an explicit set of tests
+  capture --name              Name captured fixtures and update index.json (post-capture)
+  diff [--pr <number>]        Semantic diff of changed fixtures (Claude summary)
   doctor                      livetest all fixtures and classify divergences
   verify                      ci-mode dry run; report any fixture misses
   explain <hash>              Describe what scenario a fixture covers
@@ -102,20 +105,95 @@ claude:
 
 func (r *Router) runInit(args []string) error {
 	_ = args
-	configPath := filepath.Join(".", "wand.yaml")
+	root := "."
+	configPath := filepath.Join(root, "wand.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		// Never clobber an existing config — it holds service upstreams the
-		// proxy needs. Re-running init should be a safe no-op.
+		// proxy needs. Re-running init should be a safe no-op for the config.
 		fmt.Println("wand.yaml already exists; leaving it unchanged")
+	} else if os.IsNotExist(err) {
+		if err := os.WriteFile(configPath, []byte(defaultWandConfig), 0o644); err != nil {
+			return err
+		}
+		fmt.Println("created wand.yaml")
+	} else {
+		return err
+	}
+
+	// Shims are tool-managed code, so installing them is independent of whether
+	// the config already existed — re-running init on a python project keeps the
+	// shims in sync with the installed wand version.
+	return r.installPythonShims(root)
+}
+
+// installPythonShims drops the python client-side shims into the project when a
+// python project is detected. client.py and marks.py are always installed; the
+// boto3 bridge only when boto3/botocore is a declared dependency, so non-AWS
+// projects don't get an unused module.
+func (r *Router) installPythonShims(root string) error {
+	if !isPythonProject(root) {
 		return nil
-	} else if !os.IsNotExist(err) {
+	}
+
+	modules := []string{"client.py", "marks.py"}
+	if usesBoto3(root) {
+		modules = append(modules, "boto3_shim.py")
+	}
+
+	// Hidden, tool-managed directory — overwritten on each init, not hand-edited.
+	dest := filepath.Join(root, ".wand", "shims", "python")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(configPath, []byte(defaultWandConfig), 0o644); err != nil {
-		return err
+	for _, name := range modules {
+		data, err := shims.PythonShim(name)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dest, name), data, 0o644); err != nil {
+			return err
+		}
 	}
-	fmt.Println("created wand.yaml")
+
+	fmt.Printf("installed python shims to %s: %s\n", dest, strings.Join(modules, ", "))
 	return nil
+}
+
+// isPythonProject reports whether root looks like a python project: a standard
+// packaging/dependency manifest, or failing that any top-level .py file.
+func isPythonProject(root string) bool {
+	markers := []string{"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"}
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(root, m)); err == nil {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
+			return true
+		}
+	}
+	return false
+}
+
+// usesBoto3 reports whether any dependency manifest mentions boto3 or botocore.
+func usesBoto3(root string) bool {
+	manifests := []string{"requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg"}
+	for _, name := range manifests {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		lower := strings.ToLower(string(data))
+		if strings.Contains(lower, "boto3") || strings.Contains(lower, "botocore") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) runProxy(args []string) error {
@@ -138,50 +216,6 @@ func (r *Router) runProxy(args []string) error {
 	default:
 		return fmt.Errorf("unknown proxy command %q", subcommand)
 	}
-	return nil
-}
-
-func (r *Router) runCapture(args []string) error {
-	if len(args) == 0 {
-		fmt.Println("capture placeholder: no scope provided")
-		return nil
-	}
-	if len(args) >= 2 && args[0] == "--tests" {
-		fmt.Printf("capture placeholder: explicit scope %s\n", args[1])
-		return nil
-	}
-	fmt.Printf("capture placeholder: %s\n", strings.Join(args, " "))
-	return nil
-}
-
-func (r *Router) runDiff(args []string) error {
-	if len(args) >= 2 && args[0] == "--pr" {
-		fmt.Printf("diff placeholder: PR %s\n", args[1])
-		return nil
-	}
-	fmt.Println("diff placeholder: semantic diff of changed fixtures")
-	return nil
-}
-
-func (r *Router) runDoctor(args []string) error {
-	_ = args
-	fmt.Println("doctor placeholder: live test and divergence classification")
-	return nil
-}
-
-func (r *Router) runExplain(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: wand explain <hash>")
-	}
-	fmt.Printf("explain placeholder: %s\n", args[0])
-	return nil
-}
-
-func (r *Router) runScaffold(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: wand scaffold <description>")
-	}
-	fmt.Printf("scaffold placeholder: %s\n", strings.Join(args, " "))
 	return nil
 }
 
