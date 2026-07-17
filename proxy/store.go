@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,7 +44,9 @@ type Divergence struct {
 	Fixture string `json:"fixture"`
 }
 
-const divergenceFile = "livetest_divergences.json"
+// divergenceFile is JSON Lines — one Divergence object per line — since it is
+// an append-only log written from concurrent request handlers.
+const divergenceFile = "livetest_divergences.jsonl"
 
 func NewStore() *Store {
 	return NewStoreWithRoot(".")
@@ -73,8 +76,8 @@ func (s *Store) Write(service, hash string, req []byte, resp []byte) error {
 		return err
 	}
 
-	reqPath := filepath.Join(baseDir, hash+"_req.json")
-	respPath := filepath.Join(baseDir, hash+"_resp.json")
+	reqPath := filepath.Join(baseDir, hash+"_req.jsonl")
+	respPath := filepath.Join(baseDir, hash+"_resp.jsonl")
 
 	if err := os.WriteFile(reqPath, []byte(formatFixtureHeader(service)+string(req)), 0o644); err != nil {
 		return err
@@ -148,7 +151,7 @@ func (s *Store) List() ([]FixtureRef, error) {
 			continue
 		}
 		for _, f := range files {
-			if hash := strings.TrimSuffix(f.Name(), "_req.json"); hash != f.Name() {
+			if hash, ok := strings.CutSuffix(f.Name(), "_req.jsonl"); ok {
 				refs = append(refs, FixtureRef{Service: service, Hash: hash})
 			}
 		}
@@ -176,33 +179,54 @@ func (s *Store) Resolve(hashArg string) (FixtureRef, bool) {
 	return FixtureRef{}, false
 }
 
-// AppendDivergence records one livetest mismatch. Safe for concurrent callers.
+// AppendDivergence records one livetest mismatch as a single JSONL line. Safe
+// for concurrent callers; appends without rewriting the existing log.
 func (s *Store) AppendDivergence(d Divergence) error {
 	s.divMu.Lock()
 	defer s.divMu.Unlock()
-	list, _ := s.LoadDivergences()
-	list = append(list, d)
 	if err := os.MkdirAll(filepath.Join(s.root, "__fixtures__"), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
+	line, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.root, "__fixtures__", divergenceFile), append(data, '\n'), 0o644)
+	f, err := os.OpenFile(filepath.Join(s.root, "__fixtures__", divergenceFile),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
 }
 
-// LoadDivergences reads the recorded livetest divergences (empty if none).
+// LoadDivergences reads the recorded livetest divergences (empty if none),
+// parsing the JSONL log one line at a time.
 func (s *Store) LoadDivergences() ([]Divergence, error) {
-	data, err := os.ReadFile(filepath.Join(s.root, "__fixtures__", divergenceFile))
+	f, err := os.Open(filepath.Join(s.root, "__fixtures__", divergenceFile))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 	var list []Divergence
-	if err := json.Unmarshal(data, &list); err != nil {
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var d Divergence
+		if err := json.Unmarshal(line, &d); err != nil {
+			return nil, err
+		}
+		list = append(list, d)
+	}
+	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 	return list, nil
@@ -219,7 +243,7 @@ func (s *Store) ClearDivergences() error {
 
 func (s *Store) fixturePaths(service, hash string) (string, string) {
 	baseDir := filepath.Join(s.root, "__fixtures__", service)
-	return filepath.Join(baseDir, hash+"_req.json"), filepath.Join(baseDir, hash+"_resp.json")
+	return filepath.Join(baseDir, hash+"_req.jsonl"), filepath.Join(baseDir, hash+"_resp.jsonl")
 }
 
 func formatFixtureHeader(service string) string {

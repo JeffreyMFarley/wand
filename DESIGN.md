@@ -324,15 +324,15 @@ eight 4-char groups):
 ```
 __fixtures__/
   snowflake/
-    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_req.json
-    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_resp.json
+    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_req.jsonl
+    0b2d-c84a-bed5-1060-0a97-4328-ed90-42db_resp.jsonl
   hermes/
-    1a3f-22bc-...._req.json
-    1a3f-22bc-...._resp.json
+    1a3f-22bc-...._req.jsonl
+    1a3f-22bc-...._resp.jsonl
 ```
 
 In the v1 format every fixture — request and response, for every service — is stored
-as JSON: a one-line metadata header followed by the JSON body. This replaces the
+as JSON Lines (`.jsonl`): a one-line metadata header followed by the one-line JSON body. This replaces the
 per-protocol on-disk formats used by the original `msmt` library (`.sql` for Snowflake
 requests, `.df` parquet for responses, `.pbb` protobuf for Hermes). The proxy is
 language-agnostic, so it speaks one wire format — JSON — and each shim is responsible

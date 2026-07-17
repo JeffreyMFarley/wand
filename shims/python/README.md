@@ -32,7 +32,7 @@ with intercept():
 ```
 
 Fixtures land under `WAND_FIXTURES` (default `__fixtures__/`) as
-`<service>/<hash>_req.json` + `_resp.json`, with an `index.json` entry — the same
+`<service>/<hash>_req.jsonl` + `_resp.jsonl`, with an `index.json` entry — the same
 store and format the Go proxy uses.
 
 ## HTTP shim — usage

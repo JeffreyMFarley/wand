@@ -12,10 +12,11 @@ signed AWS traffic through the Go proxy:
 * EC2/ELB/RDS speak XML, but wand's store is JSON — intercepting the parsed
   dict avoids the wire format entirely.
 
-Fixtures are written in wand's on-disk format (a one-line JSON header followed
-by the JSON body, content-addressed by a BLAKE2b-128 hash of the normalized
-request) so they live in the same ``__fixtures__/`` store as proxy-captured
-fixtures and remain readable by wand CLI tooling.
+Fixtures are written in wand's on-disk format: JSON Lines (``.jsonl``) with a
+one-line JSON header followed by the one-line JSON body, content-addressed by a
+BLAKE2b-128 hash of the normalized request. They live in the same
+``__fixtures__/`` store as proxy-captured fixtures and remain readable by wand
+CLI tooling.
 
 Modes (``WAND_MODE``, default ``ci``):
 
@@ -79,8 +80,8 @@ def _strip_noise(response):
 def _paths(service, digest):
     base = os.path.join(FIXTURES_ROOT, service)
     return (
-        os.path.join(base, f"{digest}_req.json"),
-        os.path.join(base, f"{digest}_resp.json"),
+        os.path.join(base, f"{digest}_req.jsonl"),
+        os.path.join(base, f"{digest}_resp.jsonl"),
     )
 
 
