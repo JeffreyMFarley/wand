@@ -12,7 +12,7 @@ import (
 
 // defaultClaudeModel is used when wand.yaml does not pin a model. Per the
 // project's AI-application guidance, this defaults to the latest Opus tier.
-const defaultClaudeModel = "claude-opus-4-8"
+const defaultClaudeModel = "claude-haiku-4-5"
 
 // ClaudeClient wraps the Anthropic API for the agentic CLI commands. It is only
 // used by developer-facing commands (scaffold/capture/diff/doctor/explain) —
