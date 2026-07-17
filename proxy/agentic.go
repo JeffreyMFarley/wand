@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	_ "embed" // for the //go:embed prompt directives below
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -22,44 +23,57 @@ import (
 
 // ---------------------------------------------------------------------------
 // prompts — every Claude system prompt (and any static instruction text) lives
-// here so they can be tuned in one place. The commands below assemble the
+// in proxy/prompts/*.md and is embedded at build time, so they can be tuned as
+// plain prose without touching Go source. The commands below assemble the
 // per-call user message from these plus the relevant diff/fixture context.
 // ---------------------------------------------------------------------------
 
-const (
+var (
 	// scaffold: generate one new test in the repo's style.
-	scaffoldSystemPrompt = "You generate one new automated test that matches the project's existing test style " +
-		"(same framework, imports, naming, and structure). " +
-		"Output the suggested file path on the first line as `path: <relative/path>`, then a blank line, " +
-		"then only the test source code. Do not wrap the code in markdown fences."
+	//go:embed prompts/scaffold.md
+	scaffoldSystemPrompt string
 
 	// capture --from-diff: infer which tests to re-capture from the git diff.
-	captureFromDiffSystemPrompt = "You identify which existing tests exercise changed code paths so their fixtures can be " +
-		"re-captured. Respond ONLY with a JSON array of test identifiers " +
-		"(e.g. [\"tests/test_report.py::test_authors\"]). Prefer a small, precise set."
+	//go:embed prompts/capture_from_diff.md
+	captureFromDiffSystemPrompt string
 
 	// capture --name: name a captured fixture.
-	captureNameSystemPrompt = "You name API test fixtures. Respond with a single short scenario name " +
-		"(max 10 words), nothing else."
+	//go:embed prompts/capture_name.md
+	captureNameSystemPrompt string
 
 	// diff: summarize fixture changes for a PR description.
-	diffSystemPrompt = "You summarize changes to API test fixtures for a pull-request description. " +
-		"Focus on behavioral and schema changes (new/removed fields, changed values, new scenarios). " +
-		"Ignore pure formatting. Write a few concise bullet points."
+	//go:embed prompts/diff.md
+	diffSystemPrompt string
 
 	// doctor: classify a fixture-vs-live divergence.
-	doctorSystemPrompt = "You classify API contract divergences between a stored fixture and a live response. " +
-		"Reply with exactly one word on the first line — BREAKING, BENIGN, or NOISE — then a one-line reason.\n" +
-		"BREAKING = schema change, removed fields, or changed semantics.\n" +
-		"BENIGN = additive optional fields only.\n" +
-		"NOISE = timestamps, durations, or cursor values that belong in the normalization config."
+	//go:embed prompts/doctor.md
+	doctorSystemPrompt string
 
-	// explain: describe what scenario a fixture covers. The instruction is
-	// appended to the assembled request/response context as the user message.
-	explainSystemPrompt = "You explain captured API test fixtures to developers. Be concise and concrete."
-	explainInstruction  = "In 2-4 sentences, describe what scenario this fixture covers and the key parameters. " +
-		"Respond with the description only."
+	// explain: describe what scenario a fixture covers.
+	//go:embed prompts/explain.md
+	explainSystemPrompt string
+
+	// explain: instruction appended to the request/response context as the user message.
+	//go:embed prompts/explain_instruction.md
+	explainInstruction string
 )
+
+// init trims the embedded prompts once at startup: files carry a trailing
+// newline (and editors may add leading/trailing whitespace as they're tuned),
+// which we don't want leaking into system/user messages.
+func init() {
+	for _, p := range []*string{
+		&scaffoldSystemPrompt,
+		&captureFromDiffSystemPrompt,
+		&captureNameSystemPrompt,
+		&diffSystemPrompt,
+		&doctorSystemPrompt,
+		&explainSystemPrompt,
+		&explainInstruction,
+	} {
+		*p = strings.TrimSpace(*p)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // scaffold — generate a new test matching the repo's style, queue a capture
