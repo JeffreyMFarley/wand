@@ -76,58 +76,125 @@ func init() {
 }
 
 // ---------------------------------------------------------------------------
-// scaffold — generate a new test matching the repo's style, queue a capture
+// scaffold — generate an integration test for each given source file
 // ---------------------------------------------------------------------------
 
 func (r *Router) runScaffold(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: wand scaffold <description>")
+		return fmt.Errorf("usage: wand scaffold <file-or-dir>...")
 	}
-	desc := strings.Join(args, " ")
-
-	examples := sampleTests(3)
-	system := scaffoldSystemPrompt
-
-	var b strings.Builder
-	if len(examples) > 0 {
-		b.WriteString("Existing tests for style reference:\n\n")
-		for _, ex := range examples {
-			fmt.Fprintf(&b, "=== %s ===\n%s\n\n", ex.path, truncateStr(ex.content, 3000))
-		}
-	} else {
-		b.WriteString("No existing tests were found; use idiomatic style for the repo's language.\n\n")
-	}
-	fmt.Fprintf(&b, "Write a new test for this scenario:\n%s\n", desc)
-
-	out, err := NewClaudeClient().Complete(context.Background(), system, b.String())
+	sources, err := resolveSourceTargets(args)
 	if err != nil {
 		return err
 	}
-
-	path, code := parseScaffold(out)
-	if path == "" {
-		// Claude didn't propose a path — show the code and let the developer place it.
-		fmt.Println("Generated test (no path proposed — save it yourself):")
-		fmt.Println()
-		fmt.Println(code)
+	if len(sources) == 0 {
+		fmt.Println("no source files found in the given paths")
 		return nil
 	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("refusing to overwrite existing file %s; the generated test is:\n\n%s", path, code)
-	}
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+
+	client := NewClaudeClient()
+	var written, skipped int
+	for _, src := range sources {
+		wrote, err := r.scaffoldOne(client, src)
+		if err != nil {
 			return err
 		}
+		if wrote {
+			written++
+		} else {
+			skipped++
+		}
 	}
-	if err := os.WriteFile(path, []byte(code+"\n"), 0o644); err != nil {
-		return err
+
+	fmt.Printf("\nscaffold complete: %d written, %d skipped\n", written, skipped)
+	if written > 0 {
+		fmt.Println("Next: capture fixtures by running the new tests in capture mode, e.g.:")
+		fmt.Println("  WAND_MODE=capture <your test runner> <new test files>")
+		fmt.Println("Then name the fixtures:  wand capture --name")
 	}
-	fmt.Printf("wrote %s\n\n", path)
-	fmt.Println("Next: capture fixtures for it by running the test in capture mode, e.g.:")
-	fmt.Printf("  WAND_MODE=capture <your test runner> %s\n", path)
-	fmt.Println("Then name the fixtures:  wand capture --name")
 	return nil
+}
+
+// scaffoldOne generates a single integration test for one source file. It
+// reports whether a test file was written (false = skipped, either because the
+// file doesn't qualify per the prompt or a test already exists). Only I/O and
+// API errors are returned; per-file skips are printed and swallowed so one
+// unqualifying file never aborts a directory sweep.
+func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return false, err
+	}
+
+	dest, err := testPathFor(src)
+	if err != nil {
+		fmt.Printf("skipped %s: %v\n", src, err)
+		return false, nil
+	}
+	if _, err := os.Stat(dest); err == nil {
+		fmt.Printf("skipped %s: %s already exists\n", src, dest)
+		return false, nil
+	}
+
+	user := fmt.Sprintf("Source file: %s\n\n%s\n", src, truncateStr(string(data), 12000))
+	out, err := client.Complete(context.Background(), scaffoldSystemPrompt, user)
+	if err != nil {
+		return false, err
+	}
+
+	if reason, skip := noIntegrationTest(out); skip {
+		fmt.Printf("skipped %s: %s\n", src, reason)
+		return false, nil
+	}
+
+	code := stripFences(out)
+	if dir := filepath.Dir(dest); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return false, err
+		}
+	}
+	if err := os.WriteFile(dest, []byte(code+"\n"), 0o644); err != nil {
+		return false, err
+	}
+	fmt.Printf("wrote %s (from %s)\n", dest, src)
+	return true, nil
+}
+
+// testPathFor derives the path of the test file to generate for a source file,
+// applying each language's convention: Go tests must sit beside the source in
+// the same package; Python tests are mirrored under a top-level tests/ dir;
+// JS/TS tests sit beside the source with a .test infix.
+func testPathFor(src string) (string, error) {
+	dir := filepath.Dir(src)
+	base := filepath.Base(src)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+
+	switch ext {
+	case ".go":
+		return filepath.Join(dir, name+"_test.go"), nil
+	case ".py":
+		return filepath.Join("tests", dir, "test_"+name+".py"), nil
+	case ".js", ".jsx", ".ts", ".tsx":
+		return filepath.Join(dir, name+".test"+ext), nil
+	default:
+		return "", fmt.Errorf("unsupported source extension %q", ext)
+	}
+}
+
+// noIntegrationTest detects the prompt's "No integration test. <reason>"
+// response for a source file that doesn't qualify, returning the reason.
+func noIntegrationTest(out string) (reason string, skip bool) {
+	trimmed := strings.TrimLeft(strings.TrimSpace(out), "> ") // may arrive as a blockquote
+	const marker = "No integration test"
+	if !strings.HasPrefix(trimmed, marker) {
+		return "", false
+	}
+	reason = firstLine(strings.TrimLeft(strings.TrimPrefix(trimmed, marker), ".:- "))
+	if reason == "" {
+		reason = "no qualifying external calls"
+	}
+	return reason, true
 }
 
 // ---------------------------------------------------------------------------
@@ -157,12 +224,23 @@ func (r *Router) runCapture(args []string) error {
 	return nil
 }
 
-// resolveCaptureTargets validates each path and expands directories into the
-// test files they contain. Explicit file arguments are taken as-is; directories
-// are walked and filtered to recognized test files (skipping vendored/generated
-// trees). It errors if any path does not exist, so a typo never silently
-// captures nothing.
+// resolveCaptureTargets expands the given paths into the test files to capture.
 func resolveCaptureTargets(paths []string) ([]string, error) {
+	return walkTargets(paths, isTestFile)
+}
+
+// resolveSourceTargets expands the given paths into the source files to
+// scaffold tests for.
+func resolveSourceTargets(paths []string) ([]string, error) {
+	return walkTargets(paths, isSourceFile)
+}
+
+// walkTargets validates each path and expands directories into the files that
+// keep() accepts. Explicit file arguments are taken as-is (keep is not applied,
+// so a developer can name any file directly); directories are walked and
+// filtered, skipping vendored/generated trees. It errors if any path does not
+// exist, so a typo never silently resolves to nothing.
+func walkTargets(paths []string, keep func(name string) bool) ([]string, error) {
 	var files, missing []string
 	seen := map[string]bool{}
 	add := func(p string) {
@@ -197,7 +275,7 @@ func resolveCaptureTargets(paths []string) ([]string, error) {
 				}
 				return nil
 			}
-			if isTestFile(d.Name()) {
+			if keep(d.Name()) {
 				add(wp)
 			}
 			return nil
@@ -429,68 +507,33 @@ func (r *Router) runExplain(args []string) error {
 // helpers
 // ---------------------------------------------------------------------------
 
-type testSample struct {
-	path    string
-	content string
-}
-
-// sampleTests walks the working tree and returns up to n test files as style
-// references, skipping vendored and generated directories.
-func sampleTests(n int) []testSample {
-	var out []testSample
-	_ = filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "__fixtures__", "dist", "build":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if len(out) >= n {
-			return filepath.SkipAll
-		}
-		if isTestFile(d.Name()) {
-			if data, err := os.ReadFile(p); err == nil {
-				out = append(out, testSample{path: p, content: string(data)})
-			}
-		}
-		return nil
-	})
-	return out
-}
-
 func isTestFile(name string) bool {
-	switch {
-	case strings.HasSuffix(name, "_test.go"),
-		strings.HasSuffix(name, "_test.py"),
-		strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py"),
-		strings.HasSuffix(name, ".test.ts"),
-		strings.HasSuffix(name, ".test.js"),
-		strings.HasSuffix(name, ".spec.ts"),
-		strings.HasSuffix(name, ".spec.js"):
+	if strings.HasSuffix(name, "_test.go") ||
+		strings.HasSuffix(name, "_test.py") ||
+		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) {
 		return true
+	}
+	for _, infix := range []string{".test.", ".spec."} {
+		for _, ext := range []string{"js", "jsx", "ts", "tsx"} {
+			if strings.HasSuffix(name, infix+ext) {
+				return true
+			}
+		}
 	}
 	return false
 }
 
-func parseScaffold(out string) (path, code string) {
-	out = strings.TrimSpace(out)
-	rest := out
-	if lines := strings.SplitN(out, "\n", 2); len(lines) > 0 {
-		first := strings.TrimSpace(lines[0])
-		if strings.HasPrefix(strings.ToLower(first), "path:") {
-			path = strings.TrimSpace(first[len("path:"):])
-			if len(lines) > 1 {
-				rest = lines[1]
-			} else {
-				rest = ""
-			}
-		}
+// isSourceFile reports whether name is a source file scaffold can generate a
+// test for: a recognized language extension that is not itself a test file.
+func isSourceFile(name string) bool {
+	if isTestFile(name) {
+		return false
 	}
-	return path, stripFences(rest)
+	switch filepath.Ext(name) {
+	case ".go", ".py", ".js", ".jsx", ".ts", ".tsx":
+		return true
+	}
+	return false
 }
 
 func stripFences(s string) string {

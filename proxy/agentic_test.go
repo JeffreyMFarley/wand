@@ -1,25 +1,67 @@
 package proxy
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
-func TestParseScaffoldExtractsPathAndStripsFences(t *testing.T) {
-	out := "path: tests/test_new.py\n\n```python\ndef test_x():\n    assert True\n```"
-	path, code := parseScaffold(out)
-	if path != "tests/test_new.py" {
-		t.Fatalf("path = %q", path)
+func TestTestPathFor(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{filepath.Join("pkg", "report.go"), filepath.Join("pkg", "report_test.go")},
+		{filepath.Join("pkg", "report.py"), filepath.Join("tests", "pkg", "test_report.py")},
+		{"report.py", filepath.Join("tests", "test_report.py")},
+		{filepath.Join("src", "report.ts"), filepath.Join("src", "report.test.ts")},
+		{filepath.Join("src", "report.jsx"), filepath.Join("src", "report.test.jsx")},
 	}
-	if code != "def test_x():\n    assert True" {
-		t.Fatalf("code = %q", code)
+	for _, c := range cases {
+		got, err := testPathFor(c.src)
+		if err != nil {
+			t.Fatalf("testPathFor(%q) error: %v", c.src, err)
+		}
+		if got != c.want {
+			t.Errorf("testPathFor(%q) = %q, want %q", c.src, got, c.want)
+		}
+	}
+	if _, err := testPathFor("README.md"); err == nil {
+		t.Error("expected error for unsupported extension, got nil")
 	}
 }
 
-func TestParseScaffoldNoPath(t *testing.T) {
-	path, code := parseScaffold("def test_x():\n    pass")
-	if path != "" {
-		t.Fatalf("expected empty path, got %q", path)
+func TestIsSourceFile(t *testing.T) {
+	source := []string{"report.py", "report.go", "report.ts", "app.jsx"}
+	notSource := []string{"test_report.py", "report_test.go", "report.test.ts", "report.spec.tsx", "README.md", "data.json"}
+	for _, n := range source {
+		if !isSourceFile(n) {
+			t.Errorf("isSourceFile(%q) = false, want true", n)
+		}
 	}
-	if code != "def test_x():\n    pass" {
-		t.Fatalf("code = %q", code)
+	for _, n := range notSource {
+		if isSourceFile(n) {
+			t.Errorf("isSourceFile(%q) = true, want false", n)
+		}
+	}
+}
+
+func TestNoIntegrationTest(t *testing.T) {
+	skip := map[string]string{
+		"No integration test. Pure data container":     "Pure data container",
+		"> No integration test. Redux middleware only": "Redux middleware only",
+		"No integration test":                          "no qualifying external calls",
+	}
+	for in, wantReason := range skip {
+		reason, isSkip := noIntegrationTest(in)
+		if !isSkip {
+			t.Errorf("noIntegrationTest(%q) skip = false, want true", in)
+		}
+		if reason != wantReason {
+			t.Errorf("noIntegrationTest(%q) reason = %q, want %q", in, reason, wantReason)
+		}
+	}
+	if _, isSkip := noIntegrationTest("import unittest\nclass T(...)"); isSkip {
+		t.Error("noIntegrationTest on real test code returned skip = true")
 	}
 }
 

@@ -39,7 +39,7 @@ Commands:
   doctor                      livetest all fixtures and classify divergences
   verify                      ci-mode dry run; report any fixture misses
   explain <hash>              Describe what scenario a fixture covers
-  scaffold <description>      Generate a test and queue a capture
+  scaffold <file-or-dir>...   Generate integration tests for the given source files/dirs
   normalizer                  Run normalization discovery/checks
   help                        Show this help
 
