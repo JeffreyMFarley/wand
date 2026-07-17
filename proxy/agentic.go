@@ -536,17 +536,32 @@ func isSourceFile(name string) bool {
 	return false
 }
 
+// stripFences extracts the code from Claude's response. Models often wrap the
+// file in a ```lang fenced block, and sometimes precede it with a paragraph of
+// preamble ("I'll analyze the file...") or the reasoning steps from the prompt
+// — none of which must end up in the written file. So we locate the first
+// fenced block anywhere in the response and return only its contents,
+// discarding everything before the opening fence and after the closing fence.
+// If there is no fence at all, the whole trimmed response is returned, since
+// the model occasionally emits raw code with no fence.
 func stripFences(s string) string {
 	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "```") {
-		if i := strings.Index(s, "\n"); i >= 0 {
-			s = s[i+1:]
-		}
-		if j := strings.LastIndex(s, "```"); j >= 0 {
-			s = s[:j]
-		}
+	open := strings.Index(s, "```")
+	if open < 0 {
+		return s
 	}
-	return strings.TrimSpace(s)
+	// Drop everything up to and including the opening fence's own line, which
+	// carries the optional language tag (```python).
+	rest := s[open+3:]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[nl+1:]
+	} else {
+		rest = ""
+	}
+	if close := strings.Index(rest, "```"); close >= 0 {
+		rest = rest[:close]
+	}
+	return strings.TrimSpace(rest)
 }
 
 func printCaptureInstructions(targets []string) {

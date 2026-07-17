@@ -98,3 +98,29 @@ func TestFirstLineTrimsQuotes(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestStripFences(t *testing.T) {
+	cases := map[string]struct{ in, want string }{
+		"plain fenced block": {
+			in:   "```python\nprint(1)\n```",
+			want: "print(1)",
+		},
+		"preamble before the fence is discarded": {
+			in:   "I'll analyze the file.\n\n**Step 6**\n\n```python\nprint(1)\n```",
+			want: "print(1)",
+		},
+		"trailing prose after the fence is discarded": {
+			in:   "```python\nprint(1)\n```\nThat's the file.",
+			want: "print(1)",
+		},
+		"no fence returns raw body": {
+			in:   "print(1)",
+			want: "print(1)",
+		},
+	}
+	for name, c := range cases {
+		if got := stripFences(c.in); got != c.want {
+			t.Fatalf("%s: stripFences(%q) = %q, want %q", name, c.in, got, c.want)
+		}
+	}
+}

@@ -131,7 +131,63 @@ func TestRunInitInstallsPythonShims(t *testing.T) {
 					t.Errorf("expected shim %s to be absent, stat err = %v", mod, err)
 				}
 			}
+
+			// A root conftest.py that activates the boto3 bridge is created
+			// only for boto3 projects.
+			wantsBoto3 := contains(tt.present, "boto3_shim.py")
+			_, statErr := os.Stat(filepath.Join(d, "conftest.py"))
+			if wantsBoto3 && statErr != nil {
+				t.Errorf("expected root conftest.py for a boto3 project: %v", statErr)
+			}
+			if !wantsBoto3 && !os.IsNotExist(statErr) {
+				t.Errorf("expected no root conftest.py for a non-boto3 project, stat err = %v", statErr)
+			}
 		})
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunInitDoesNotClobberExistingConftest(t *testing.T) {
+	d := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	defer os.Chdir(cwd)
+	if err := os.Chdir(d); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "requirements.txt"), []byte("boto3\n"), 0o644); err != nil {
+		t.Fatalf("write requirements: %v", err)
+	}
+	const existing = "# my own fixtures\n"
+	if err := os.WriteFile(filepath.Join(d, "conftest.py"), []byte(existing), 0o644); err != nil {
+		t.Fatalf("write conftest: %v", err)
+	}
+
+	r := NewRouter(Config{})
+	if err := r.Run([]string{"init"}); err != nil {
+		t.Fatalf("init returned error: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(d, "conftest.py"))
+	if err != nil {
+		t.Fatalf("read conftest: %v", err)
+	}
+	if string(got) != existing {
+		t.Errorf("existing conftest.py was clobbered:\n%s", got)
+	}
+	// The reference copy still lands in the tool-managed shim dir.
+	if _, err := os.Stat(filepath.Join(d, ".wand", "shims", "python", "conftest.py")); err != nil {
+		t.Errorf("expected reference conftest in shim dir: %v", err)
 	}
 }
 

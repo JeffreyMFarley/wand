@@ -136,7 +136,8 @@ func (r *Router) installPythonShims(root string) error {
 	}
 
 	modules := []string{"client.py", "marks.py"}
-	if usesBoto3(root) {
+	boto3 := usesBoto3(root)
+	if boto3 {
 		modules = append(modules, "boto3_shim.py")
 	}
 
@@ -156,6 +157,48 @@ func (r *Router) installPythonShims(root string) error {
 	}
 
 	fmt.Printf("installed python shims to %s: %s\n", dest, strings.Join(modules, ", "))
+
+	// The boto3 bridge only records/replays while boto3_shim.intercept() is
+	// active. Drop a root conftest.py that enters it for the whole session so
+	// `WAND_MODE=capture pytest` actually produces fixtures. Only relevant for
+	// boto3 projects, and never clobbered — a project's own conftest may hold
+	// unrelated fixtures.
+	if boto3 {
+		if err := installPytestConftest(root, dest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installPytestConftest writes the session-activation conftest to the project
+// root, unless one already exists (a project may have its own). A reference
+// copy always lands in the tool-managed shim dir so users with their own
+// conftest have something to copy the _wand_intercept fixture from.
+func installPytestConftest(root, shimDir string) error {
+	data, err := shims.PythonConftest()
+	if err != nil {
+		return err
+	}
+
+	reference := filepath.Join(shimDir, "conftest.py")
+	if err := os.WriteFile(reference, data, 0o644); err != nil {
+		return err
+	}
+
+	conftestPath := filepath.Join(root, "conftest.py")
+	if _, err := os.Stat(conftestPath); err == nil {
+		fmt.Printf("conftest.py already exists; leaving it unchanged — add the "+
+			"_wand_intercept fixture from %s to activate the boto3 bridge\n", reference)
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := os.WriteFile(conftestPath, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("created %s (activates the boto3 bridge for pytest)\n", conftestPath)
 	return nil
 }
 

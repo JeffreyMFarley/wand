@@ -225,3 +225,9 @@ Produce exactly one file. The file should be named `test_<source_file_name>` in
 Python, `<source_file_name>_test.go` in Go, or `<source_file_name>.test.js` in
 Node. Include a brief comment block at the top identifying it as an integration
 test and noting that mocking is handled externally.
+
+Work through Steps 1–8 silently. Your entire response must be **only** the file,
+wrapped in a single fenced code block (```python / ```go / ```js) and nothing
+else — no preamble, no step-by-step reasoning, no explanation before or after
+the fence. The one exception is a non-qualifying file, where you output the
+`No integration test.` line from Step 1 instead of a code block.
