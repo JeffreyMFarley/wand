@@ -21,6 +21,47 @@ import (
 // without an API key; only the semantic step needs credentials.
 
 // ---------------------------------------------------------------------------
+// prompts — every Claude system prompt (and any static instruction text) lives
+// here so they can be tuned in one place. The commands below assemble the
+// per-call user message from these plus the relevant diff/fixture context.
+// ---------------------------------------------------------------------------
+
+const (
+	// scaffold: generate one new test in the repo's style.
+	scaffoldSystemPrompt = "You generate one new automated test that matches the project's existing test style " +
+		"(same framework, imports, naming, and structure). " +
+		"Output the suggested file path on the first line as `path: <relative/path>`, then a blank line, " +
+		"then only the test source code. Do not wrap the code in markdown fences."
+
+	// capture <description>: pick which existing tests to re-capture.
+	captureScopeSystemPrompt = "You identify which existing tests exercise changed code paths so their fixtures can be " +
+		"re-captured. Respond ONLY with a JSON array of test identifiers " +
+		"(e.g. [\"tests/test_report.py::test_authors\"]). Prefer a small, precise set."
+
+	// capture --name: name a captured fixture.
+	captureNameSystemPrompt = "You name API test fixtures. Respond with a single short scenario name " +
+		"(max 10 words), nothing else."
+
+	// diff: summarize fixture changes for a PR description.
+	diffSystemPrompt = "You summarize changes to API test fixtures for a pull-request description. " +
+		"Focus on behavioral and schema changes (new/removed fields, changed values, new scenarios). " +
+		"Ignore pure formatting. Write a few concise bullet points."
+
+	// doctor: classify a fixture-vs-live divergence.
+	doctorSystemPrompt = "You classify API contract divergences between a stored fixture and a live response. " +
+		"Reply with exactly one word on the first line — BREAKING, BENIGN, or NOISE — then a one-line reason.\n" +
+		"BREAKING = schema change, removed fields, or changed semantics.\n" +
+		"BENIGN = additive optional fields only.\n" +
+		"NOISE = timestamps, durations, or cursor values that belong in the normalization config."
+
+	// explain: describe what scenario a fixture covers. The instruction is
+	// appended to the assembled request/response context as the user message.
+	explainSystemPrompt = "You explain captured API test fixtures to developers. Be concise and concrete."
+	explainInstruction  = "In 2-4 sentences, describe what scenario this fixture covers and the key parameters. " +
+		"Respond with the description only."
+)
+
+// ---------------------------------------------------------------------------
 // scaffold — generate a new test matching the repo's style, queue a capture
 // ---------------------------------------------------------------------------
 
@@ -31,10 +72,7 @@ func (r *Router) runScaffold(args []string) error {
 	desc := strings.Join(args, " ")
 
 	examples := sampleTests(3)
-	system := "You generate one new automated test that matches the project's existing test style " +
-		"(same framework, imports, naming, and structure). " +
-		"Output the suggested file path on the first line as `path: <relative/path>`, then a blank line, " +
-		"then only the test source code. Do not wrap the code in markdown fences."
+	system := scaffoldSystemPrompt
 
 	var b strings.Builder
 	if len(examples) > 0 {
@@ -109,9 +147,7 @@ func (r *Router) captureScope(desc string) error {
 	diff, _ := codeDiff()
 	index, _ := NewStore().LoadIndex()
 
-	system := "You identify which existing tests exercise changed code paths so their fixtures can be " +
-		"re-captured. Respond ONLY with a JSON array of test identifiers " +
-		"(e.g. [\"tests/test_report.py::test_authors\"]). Prefer a small, precise set."
+	system := captureScopeSystemPrompt
 	var b strings.Builder
 	fmt.Fprintf(&b, "Change description: %s\n\n", desc)
 	if len(index) > 0 {
@@ -161,8 +197,7 @@ func (r *Router) captureName() error {
 	}
 
 	client := NewClaudeClient()
-	system := "You name API test fixtures. Respond with a single short scenario name " +
-		"(max 10 words), nothing else."
+	system := captureNameSystemPrompt
 	named := 0
 	for _, ref := range refs {
 		entry := index[ref.Hash]
@@ -221,9 +256,7 @@ func (r *Router) runDiff(args []string) error {
 		return nil
 	}
 
-	system := "You summarize changes to API test fixtures for a pull-request description. " +
-		"Focus on behavioral and schema changes (new/removed fields, changed values, new scenarios). " +
-		"Ignore pure formatting. Write a few concise bullet points."
+	system := diffSystemPrompt
 	out, err := NewClaudeClient().Complete(context.Background(), system,
 		"Summarize what changed in these fixtures:\n\n"+truncateStr(diff, 12000))
 	if err != nil {
@@ -251,11 +284,7 @@ func (r *Router) runDoctor(args []string) error {
 	}
 
 	client := NewClaudeClient()
-	system := "You classify API contract divergences between a stored fixture and a live response. " +
-		"Reply with exactly one word on the first line — BREAKING, BENIGN, or NOISE — then a one-line reason.\n" +
-		"BREAKING = schema change, removed fields, or changed semantics.\n" +
-		"BENIGN = additive optional fields only.\n" +
-		"NOISE = timestamps, durations, or cursor values that belong in the normalization config."
+	system := doctorSystemPrompt
 
 	breaking := 0
 	for _, d := range divs {
@@ -305,10 +334,9 @@ func (r *Router) runExplain(args []string) error {
 		fmt.Fprintf(&b, "Used by tests: %s\n", strings.Join(entry.Tests, ", "))
 	}
 	fmt.Fprintf(&b, "\nRequest:\n%s\n\nResponse:\n%s\n", truncate(req, 4000), truncate(resp, 4000))
-	b.WriteString("\nIn 2-4 sentences, describe what scenario this fixture covers and the key parameters. " +
-		"Respond with the description only.")
+	b.WriteString("\n" + explainInstruction)
 
-	system := "You explain captured API test fixtures to developers. Be concise and concrete."
+	system := explainSystemPrompt
 	out, err := NewClaudeClient().Complete(context.Background(), system, b.String())
 	if err != nil {
 		return err
