@@ -4,36 +4,38 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"gopkg.in/yaml.v3"
 )
 
-// defaultClaudeModel is used when wand.yaml does not pin a model. Per the
-// project's AI-application guidance, this defaults to the latest Opus tier.
+// defaultClaudeModel is used when wand.yaml does not pin a model.
 const defaultClaudeModel = "claude-haiku-4-5"
 
-// ClaudeClient wraps the Anthropic API for the agentic CLI commands. It is only
-// used by developer-facing commands (scaffold/capture/diff/doctor/explain) —
-// never in ci mode, which stays fully deterministic and offline.
+// ClaudeClient routes agentic CLI commands through the local `claude` binary,
+// inheriting whatever account it is authenticated with. This means no API key
+// is required — billing follows the `claude auth status` session, which for
+// FullStack developers is the company org.
+//
+// It is only used by developer-facing commands (scaffold/capture/diff/doctor/
+// explain) — never in ci mode, which stays fully deterministic and offline.
 type ClaudeClient struct {
-	api   anthropic.Client
-	model anthropic.Model
+	model string
 }
 
-// NewClaudeClient builds a client using ANTHROPIC_API_KEY (or an `ant` auth
-// profile) for credentials and the model configured in wand.yaml.
+// NewClaudeClient builds a client using the model configured in wand.yaml,
+// falling back to defaultClaudeModel. No credentials are resolved here —
+// the claude subprocess handles auth at call time.
 func NewClaudeClient() *ClaudeClient {
 	return &ClaudeClient{
-		api:   anthropic.NewClient(),
-		model: anthropic.Model(loadClaudeModel()),
+		model: loadClaudeModel(),
 	}
 }
 
-// Model reports the model this client will call, for display in CLI output.
+// Model reports the model this client will use, for display in CLI output.
 func (c *ClaudeClient) Model() string {
-	return string(c.model)
+	return c.model
 }
 
 func loadClaudeModel() string {
@@ -51,46 +53,34 @@ func loadClaudeModel() string {
 	return defaultClaudeModel
 }
 
-// maxCompletionTokens bounds every Complete call. It must be large enough to
-// hold a full generated file: scaffold produces whole integration-test files,
-// which for a wide service class run well past the 4096 the API defaults toward
-// and used to be pinned at here — a too-low cap silently truncated the file
-// mid-line, leaving unparsable output on disk.
-const maxCompletionTokens = 16384
-
-// Complete sends a single-shot prompt and returns Claude's text response.
-// system may be empty. It is deliberately non-streaming: these are short,
-// developer-triggered calls, not hot-path requests.
+// Complete sends a single-shot prompt to the `claude` CLI and returns the
+// text response. system may be empty — when provided it is prepended to the
+// user message with a blank line separator, which is how claude -p receives
+// a system prompt.
+//
+// The call is deliberately non-streaming and synchronous: these are short,
+// developer-triggered operations, not hot-path requests.
 func (c *ClaudeClient) Complete(ctx context.Context, system, user string) (string, error) {
-	params := anthropic.MessageNewParams{
-		Model:     c.model,
-		MaxTokens: maxCompletionTokens,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(user)),
-		},
-	}
+	prompt := user
 	if system != "" {
-		params.System = []anthropic.TextBlockParam{{Text: system}}
+		prompt = system + "\n\n" + user
 	}
 
-	resp, err := c.api.Messages.New(ctx, params)
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"--model", c.model,
+		"--output-format", "text",
+		prompt,
+	)
+
+	out, err := cmd.Output()
 	if err != nil {
+		// exec.ExitError carries stderr, which has the claude error message.
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("claude request failed: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
 		return "", fmt.Errorf("claude request failed: %w", err)
 	}
 
-	var sb strings.Builder
-	for _, block := range resp.Content {
-		if t, ok := block.AsAny().(anthropic.TextBlock); ok {
-			sb.WriteString(t.Text)
-		}
-	}
-
-	// A max_tokens stop means the response was cut off mid-generation. Returning
-	// it would write a truncated, unparsable file, so fail loudly instead — the
-	// caller can retry or the cap can be raised.
-	if resp.StopReason == anthropic.StopReasonMaxTokens {
-		return "", fmt.Errorf("claude response truncated at the %d-token limit; output would be incomplete", maxCompletionTokens)
-	}
-
-	return strings.TrimSpace(sb.String()), nil
+	return strings.TrimSpace(string(out)), nil
 }
