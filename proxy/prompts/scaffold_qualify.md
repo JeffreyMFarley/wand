@@ -45,6 +45,18 @@ the class. However, if the only external calls are in a parent class or mixin an
 class under test adds no external calls of its own, the class itself does not qualify —
 the parent or mixin is the test subject.
 
+**Java**
+Triggers: `java.net.http.HttpClient`, `HttpURLConnection`, `java.sql`/JDBC
+(`DriverManager`, `DataSource`, `Connection`), any AWS SDK client
+(`software.amazon.awssdk.*`, `com.amazonaws.services.*`), an OkHttp `OkHttpClient`,
+Apache `HttpClient`, a Spring `RestTemplate`/`WebClient`, JPA/Hibernate with a live
+`EntityManager`/`SessionFactory`, `Jedis`/Lettuce (Redis), the MongoDB
+`MongoClient`, an Elasticsearch/OpenSearch client, or any third-party SDK client
+initialized with a connection string or credentials. **Also scan inherited methods
+and injected dependencies** — a class whose only external calls live in a
+superclass or an injected collaborator does not qualify on its own; that
+collaborator is the test subject.
+
 ---
 
 ## God function rule

@@ -370,7 +370,10 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 // testPathFor derives the path of the test file to generate for a source file,
 // applying each language's convention: Go tests must sit beside the source in
 // the same package; Python tests are mirrored under a top-level tests/ dir;
-// JS/TS tests sit beside the source with a .test infix.
+// JS/TS tests sit beside the source with a .test infix; PHP tests sit beside the
+// source with a Test suffix; Ruby specs are mirrored under a top-level spec/ dir;
+// Java tests mirror src/main/java into src/test/java (when present) with a Test
+// suffix, otherwise sit beside the source.
 func testPathFor(src string) (string, error) {
 	dir := filepath.Dir(src)
 	base := filepath.Base(src)
@@ -384,6 +387,14 @@ func testPathFor(src string) (string, error) {
 		return filepath.Join("tests", dir, "test_"+name+".py"), nil
 	case ".js", ".jsx", ".ts", ".tsx":
 		return filepath.Join(dir, name+".test"+ext), nil
+	case ".php":
+		return filepath.Join(dir, name+"Test.php"), nil
+	case ".rb":
+		return filepath.Join("spec", dir, name+"_spec.rb"), nil
+	case ".java":
+		mainDir := filepath.Join("src", "main", "java")
+		testDir := filepath.Join("src", "test", "java")
+		return filepath.Join(strings.Replace(dir, mainDir, testDir, 1), name+"Test.java"), nil
 	default:
 		return "", fmt.Errorf("unsupported source extension %q", ext)
 	}
@@ -717,7 +728,10 @@ func (r *Router) runExplain(args []string) error {
 func isTestFile(name string) bool {
 	if strings.HasSuffix(name, "_test.go") ||
 		strings.HasSuffix(name, "_test.py") ||
-		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) {
+		(strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py")) ||
+		strings.HasSuffix(name, "Test.php") ||
+		strings.HasSuffix(name, "_spec.rb") ||
+		strings.HasSuffix(name, "Test.java") {
 		return true
 	}
 	for _, infix := range []string{".test.", ".spec."} {
@@ -737,7 +751,7 @@ func isSourceFile(name string) bool {
 		return false
 	}
 	switch filepath.Ext(name) {
-	case ".go", ".py", ".js", ".jsx", ".ts", ".tsx":
+	case ".go", ".py", ".js", ".jsx", ".ts", ".tsx", ".php", ".rb", ".java":
 		return true
 	}
 	return false

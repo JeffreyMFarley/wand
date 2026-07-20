@@ -387,7 +387,7 @@ mechanical execution. The proxy handles all mechanical work without Claude.
 | `wand diff` | Reads before/after fixture pairs, produces plain-English summary of what changed (new SQL clauses, response schema changes, etc.) suitable for PR description |
 | `wand doctor` | After `livetest`, classifies each divergence as **breaking**, **benign**, or **noise**. Breaking = fail CI. Benign = warn. Noise = suggest normalization config update |
 | `wand explain <hash>` | Returns human-readable description of what scenario the fixture covers, what the key parameters were, and which tests use it |
-| `wand scaffold <file-or-dir>...` | Reads each given source file (directories are walked to source files) and generates an integration test for it, placed by language convention (Go beside source, Python mirrored under tests/, JS/TS beside source); non-qualifying files are skipped |
+| `wand scaffold <file-or-dir>...` | Reads each given source file (directories are walked to source files) and generates an integration test for it, placed by language convention (Go beside source, Python mirrored under tests/, JS/TS beside source, PHP beside source, Ruby mirrored under spec/, Java mirrored from src/main/java into src/test/java); non-qualifying files are skipped |
 | CI miss explanation | When `ci` mode fails to find a fixture, Claude inspects the normalized request and suggests whether a missing normalization rule is the likely cause |
 
 ### Claude API usage

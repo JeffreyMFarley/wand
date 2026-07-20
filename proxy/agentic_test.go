@@ -37,6 +37,10 @@ func TestTestPathFor(t *testing.T) {
 		{"report.py", filepath.Join("tests", "test_report.py")},
 		{filepath.Join("src", "report.ts"), filepath.Join("src", "report.test.ts")},
 		{filepath.Join("src", "report.jsx"), filepath.Join("src", "report.test.jsx")},
+		{filepath.Join("app", "Report.php"), filepath.Join("app", "ReportTest.php")},
+		{filepath.Join("lib", "report.rb"), filepath.Join("spec", "lib", "report_spec.rb")},
+		{filepath.Join("src", "main", "java", "com", "acme", "Report.java"), filepath.Join("src", "test", "java", "com", "acme", "ReportTest.java")},
+		{filepath.Join("com", "acme", "Report.java"), filepath.Join("com", "acme", "ReportTest.java")},
 	}
 	for _, c := range cases {
 		got, err := testPathFor(c.src)
@@ -53,8 +57,8 @@ func TestTestPathFor(t *testing.T) {
 }
 
 func TestIsSourceFile(t *testing.T) {
-	source := []string{"report.py", "report.go", "report.ts", "app.jsx"}
-	notSource := []string{"test_report.py", "report_test.go", "report.test.ts", "report.spec.tsx", "README.md", "data.json"}
+	source := []string{"report.py", "report.go", "report.ts", "app.jsx", "Report.php", "report.rb", "Report.java"}
+	notSource := []string{"test_report.py", "report_test.go", "report.test.ts", "report.spec.tsx", "ReportTest.php", "report_spec.rb", "ReportTest.java", "README.md", "data.json"}
 	for _, n := range source {
 		if !isSourceFile(n) {
 			t.Errorf("isSourceFile(%q) = false, want true", n)

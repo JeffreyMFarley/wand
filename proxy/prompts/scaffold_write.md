@@ -75,8 +75,8 @@ a second fixture with different options.
 
 Always produce a `unittest.TestCase` class (Python), a `testing.T`-based test
 file (Go), a `describe`/`beforeAll` block (Node/Jest), a `PHPUnit\Framework\TestCase`
-subclass (Laravel/PHP), or an RSpec `describe` block (Ruby). Never produce bare
-test functions at module level.
+subclass (Laravel/PHP), an RSpec `describe` block (Ruby), or a JUnit 5 test class
+(Java). Never produce bare test functions at module level.
 
 Use the following setup/teardown pattern:
 
@@ -167,6 +167,31 @@ after(:each) do
 end
 ```
 
+**Java / JUnit 5**
+```java
+@BeforeAll
+static void setUpBeforeAll() {
+    // Runs once. Create the real client/connection here.
+    // Instantiate the class under test and call any scan/load method.
+    // Store results in static fields for use across all test methods.
+}
+
+@AfterAll
+static void tearDownAfterAll() {
+    // Release class-level resources if needed. Often empty.
+}
+
+@BeforeEach
+void setUp() {
+    // Runs before each test. Per-test state (temp files, streams).
+}
+
+@AfterEach
+void tearDown() {
+    // Runs after each test. Clean up per-test state.
+}
+```
+
 ### What to assert
 
 Write assertions at these levels, in order:
@@ -244,12 +269,13 @@ Produce exactly one file. Name it as follows by language:
 - Node: `<source_file_name>.test.js`
 - PHP: `<source_file_name>Test.php`
 - Ruby: `<source_file_name>_spec.rb`
+- Java: `<SourceClassName>Test.java`
 
 Include a brief comment block at the top identifying it as an integration test
 and noting that mocking is handled externally.
 
 Work through Steps 1–7 silently. Your entire response must be **only** the file,
-wrapped in a single fenced code block (```python / ```go / ```js / ```php / ```ruby)
+wrapped in a single fenced code block (```python / ```go / ```js / ```php / ```ruby / ```java)
 and nothing else — no preamble, no step-by-step reasoning, no explanation before
 or after the fence. The one exception is a file that on closer reading has no
 qualifying subject, where you output the following line instead of a code block:
