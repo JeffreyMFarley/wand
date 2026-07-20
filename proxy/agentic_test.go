@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,53 @@ func (s stubCompleter) Complete(_ context.Context, _, user string) (string, erro
 		}
 	}
 	return "QUALIFIES", nil
+}
+
+// errCompleter fails on the request whose user message names failOn, and
+// counts how many calls it received, so a test can assert the sweep bailed
+// instead of classifying every file.
+type errCompleter struct {
+	failOn string
+	err    error
+	mu     sync.Mutex
+	calls  int
+}
+
+func (e *errCompleter) Complete(ctx context.Context, _, user string) (string, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	if strings.Contains(user, "Source file: "+e.failOn+"\n") {
+		return "", e.err
+	}
+	// Respect cancellation so calls launched after the failure abort rather
+	// than returning a verdict.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "QUALIFIES", nil
+}
+
+func TestScanSourcesBailsOnError(t *testing.T) {
+	d := t.TempDir()
+	for _, rel := range []string{"a.py", "b.py", "c.py"} {
+		if err := os.WriteFile(filepath.Join(d, rel), []byte("x = 1\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	t.Chdir(d)
+
+	wantErr := errors.New("claude request failed: boom")
+	client := &errCompleter{failOn: "b.py", err: wantErr}
+
+	_, err := scanSources(client, []string{"a.py", "b.py", "c.py"}, nil)
+	if err == nil {
+		t.Fatal("scanSources returned nil error, want the failing call's error")
+	}
+	// The real failure must surface, not a cancellation-fallout error masking it.
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("scanSources error = %v, want it to carry %q", err, wantErr)
+	}
 }
 
 func TestTestPathFor(t *testing.T) {

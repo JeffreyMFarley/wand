@@ -139,8 +139,8 @@ type completer interface {
 // reporting whether it warrants an integration test and, when it does not, the
 // one-line reason from the prompt. Shared by `wand scan` and `wand scaffold` so
 // both classify identically.
-func qualifyForTest(client completer, user string) (qualifies bool, reason string, err error) {
-	verdict, err := client.Complete(context.Background(), scaffoldQualifySystemPrompt, user)
+func qualifyForTest(ctx context.Context, client completer, user string) (qualifies bool, reason string, err error) {
+	verdict, err := client.Complete(ctx, scaffoldQualifySystemPrompt, user)
 	if err != nil {
 		return false, "", err
 	}
@@ -236,12 +236,12 @@ const scanConcurrency = 8
 // are returned; a file that doesn't qualify, or one whose extension has no
 // test-path convention, comes back as a non-qualifying result with a reason
 // (mirroring scaffold's per-file tolerance).
-func classifyForScan(client completer, src string) (scanClassification, error) {
+func classifyForScan(ctx context.Context, client completer, src string) (scanClassification, error) {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return scanClassification{}, err
 	}
-	qualifies, reason, err := qualifyForTest(client, scaffoldUserMessage(src, data))
+	qualifies, reason, err := qualifyForTest(ctx, client, scaffoldUserMessage(src, data))
 	if err != nil {
 		return scanClassification{}, err
 	}
@@ -266,43 +266,64 @@ func classifyForScan(client completer, src string) (scanClassification, error) {
 // scanSources classifies every source file, generating nothing. Files are
 // classified concurrently (bounded by scanConcurrency) since each is an
 // independent API round-trip, but the returned slice preserves input order.
-// progress, if non-nil, is called once per completed file with a running done
-// count and the file's result; it is serialized, so it may print freely. The
-// first I/O or API error aborts the sweep and is returned.
+// progress, if non-nil, is called once per successfully classified file with a
+// running done count and the file's result; it is serialized, so it may print
+// freely.
+//
+// The first I/O or API error aborts the sweep and is returned immediately: the
+// shared context is cancelled, which kills in-flight `claude` calls and stops
+// new ones from launching, so a failure surfaces where it happens instead of
+// after every remaining file has been scanned.
 func scanSources(client completer, sources []string, progress func(done, total int, res scanClassification)) ([]scanClassification, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	results := make([]scanClassification, len(sources))
-	errs := make([]error, len(sources))
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var firstErr error
 	done := 0
 	sem := make(chan struct{}, scanConcurrency)
 
 	for i, src := range sources {
+		// A prior call already failed and cancelled the sweep; don't queue
+		// work we'd only abort.
+		if ctx.Err() != nil {
+			break
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i int, src string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			res, err := classifyForScan(client, src)
-			results[i] = res
-			errs[i] = err
+			res, err := classifyForScan(ctx, client, src)
 
 			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				// Record the first genuine failure and cancel so in-flight and
+				// pending calls abort. Later errors are the cancellation
+				// fallout of this one (cancel() runs under the same lock after
+				// firstErr is set), so the firstErr guard keeps the real cause.
+				if firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				return
+			}
+			results[i] = res
 			done++
 			if progress != nil {
 				progress(done, len(sources), res)
 			}
-			mu.Unlock()
 		}(i, src)
 	}
 	wg.Wait()
 
-	for _, err := range errs {
-		if err != nil {
-			return nil, err
-		}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return results, nil
 }
@@ -333,7 +354,7 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 	// Qualify first: a cheap classification call decides whether the file
 	// warrants an integration test at all. If it doesn't, skip without paying
 	// for the (much larger) generation call.
-	qualifies, reason, err := qualifyForTest(client, user)
+	qualifies, reason, err := qualifyForTest(context.Background(), client, user)
 	if err != nil {
 		return false, err
 	}
