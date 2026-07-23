@@ -37,6 +37,7 @@ Commands:
   capture --name              Name captured fixtures and update index.json (post-capture)
   diff [--pr <number>]        Semantic diff of changed fixtures (Claude summary)
   doctor                      livetest all fixtures and classify divergences
+  tidy [--force] [--reset]    Delete fixtures unreached by the last ci-mode run
   verify                      ci-mode dry run; report any fixture misses
   explain <hash>              Describe what scenario a fixture covers
   scan <file-or-dir>...       Report which source files would get tests (generates nothing)
@@ -72,6 +73,8 @@ func (r *Router) Run(args []string) error {
 		return r.runDiff(remaining)
 	case "doctor":
 		return r.runDoctor(remaining)
+	case "tidy":
+		return r.runTidy(remaining)
 	case "explain":
 		return r.runExplain(remaining)
 	case "scan":

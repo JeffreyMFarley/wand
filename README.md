@@ -82,6 +82,7 @@ wand capture --from-diff [desc]  Claude infers the capture scope from the git di
 wand capture --name              Name captured fixtures and update index.json (post-capture)
 wand diff [--pr <number>]        Semantic diff of changed fixtures (Claude summary)
 wand doctor                      livetest all fixtures and classify divergences
+wand tidy [--force] [--reset]    Delete fixtures unreached by the last ci-mode run
 wand verify                      ci-mode dry run; report any fixture misses
 wand explain <hash>              Describe what scenario a fixture covers
 wand scan <file-or-dir>...       Report which source files would get tests (generates nothing)
@@ -92,7 +93,7 @@ wand help                        Show this help
 
 Commands split into two families:
 
-- **Plumbing** (`proxy`, `verify`) — work without Claude and without an API key.
+- **Plumbing** (`proxy`, `verify`, `tidy`) — work without Claude and without an API key.
 - **Agentic** (`capture`, `diff`, `doctor`, `scaffold`, `explain`) — call Claude for the
   semantic work and always show you their proposed scope before writing or deleting anything.
 

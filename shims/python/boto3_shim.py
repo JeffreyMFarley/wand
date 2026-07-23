@@ -134,6 +134,24 @@ def _update_index(service, digest, request):
         fh.write("\n")
 
 
+def _append_access(service, digest, missing=False):
+    """Record one fixture lookup for ``wand tidy``.
+
+    Mirrors the Go store's AppendAccess: one compact JSON object per line in
+    ``__fixtures__/access.jsonl`` matching proxy/store.go's Access struct
+    (``service``, ``hash``, and ``missing`` only when true). boto3 replay
+    bypasses the Go proxy, so without this a ci run leaves the access log empty
+    and tidy sees nothing as reached.
+    """
+    entry = {"service": service, "hash": digest}
+    if missing:
+        entry["missing"] = True
+    os.makedirs(FIXTURES_ROOT, exist_ok=True)
+    line = json.dumps(entry, separators=(",", ":"))
+    with open(os.path.join(FIXTURES_ROOT, "access.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
 def _replay_metadata():
     # boto3 internals (and some callers) expect this to exist.
     return {"HTTPStatusCode": 200, "RequestId": "wand-replay"}
@@ -157,16 +175,22 @@ def intercept(mode=None):
         if resolved == "ci":
             cached = _read_fixture(service, digest)
             if cached is None:
+                # Mark the miss so `wand tidy` knows this run was incomplete and
+                # must not treat its reachability data as authoritative.
+                _append_access(service, digest, missing=True)
                 raise WandFixtureMiss(
                     f"no fixture for {service}:{operation_name} ({digest})\n"
                     f"normalized request: "
                     f"{json.dumps(request, sort_keys=True, separators=(',', ':'))}"
                 )
+            _append_access(service, digest)
             return {**cached, "ResponseMetadata": _replay_metadata()}
 
         response = original(self, operation_name, api_params)
         if resolved == "capture":
             _write_fixture(service, digest, request, _strip_noise(response))
+            # A freshly captured fixture is reachable by definition.
+            _append_access(service, digest)
         return response
 
     botocore.client.BaseClient._make_api_call = _patched

@@ -27,6 +27,9 @@ type Store struct {
 	// divMu serializes divergence-file read-modify-writes, since the proxy
 	// records livetest divergences from concurrent request handlers.
 	divMu sync.Mutex
+	// accMu serializes access-log appends, written from concurrent request
+	// handlers during a run so `wand tidy` can compute fixture reachability.
+	accMu sync.Mutex
 }
 
 // FixtureRef identifies one stored fixture pair.
@@ -47,6 +50,20 @@ type Divergence struct {
 // divergenceFile is JSON Lines — one Divergence object per line — since it is
 // an append-only log written from concurrent request handlers.
 const divergenceFile = "livetest_divergences.jsonl"
+
+// Access records one fixture lookup during a run so `wand tidy` can tell which
+// stored fixtures are still reachable. Missing=true marks a CI-mode fixture
+// miss, which means the run never exercised the full set — its reachability
+// data can't be trusted to delete anything.
+type Access struct {
+	Service string `json:"service"`
+	Hash    string `json:"hash"`
+	Missing bool   `json:"missing,omitempty"`
+}
+
+// accessFile is JSON Lines — one Access object per line — an append-only log
+// written from concurrent request handlers, mirroring divergenceFile.
+const accessFile = "access.jsonl"
 
 func NewStore() *Store {
 	return NewStoreWithRoot(".")
@@ -239,6 +256,80 @@ func (s *Store) ClearDivergences() error {
 		return nil
 	}
 	return err
+}
+
+// AppendAccess records one fixture lookup as a single JSONL line. Safe for
+// concurrent callers; appends without rewriting the existing log.
+func (s *Store) AppendAccess(a Access) error {
+	s.accMu.Lock()
+	defer s.accMu.Unlock()
+	if err := os.MkdirAll(filepath.Join(s.root, "__fixtures__"), 0o755); err != nil {
+		return err
+	}
+	line, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.root, "__fixtures__", accessFile),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
+}
+
+// LoadAccess reads the recorded fixture accesses (empty if none), parsing the
+// JSONL log one line at a time.
+func (s *Store) LoadAccess() ([]Access, error) {
+	f, err := os.Open(filepath.Join(s.root, "__fixtures__", accessFile))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var list []Access
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var a Access
+		if err := json.Unmarshal(line, &a); err != nil {
+			return nil, err
+		}
+		list = append(list, a)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// ClearAccess removes the recorded access log (e.g. after tidy sweeps).
+func (s *Store) ClearAccess() error {
+	err := os.Remove(filepath.Join(s.root, "__fixtures__", accessFile))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// Remove deletes the fixture pair for service/hash. Missing files are ignored so
+// removal is idempotent; the caller drops the index entry separately.
+func (s *Store) Remove(service, hash string) error {
+	reqPath, respPath := s.fixturePaths(service, hash)
+	for _, p := range []string{reqPath, respPath} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) fixturePaths(service, hash string) (string, string) {

@@ -65,9 +65,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	case "CI":
 		_, fixtureResp, err := s.Store.Read(service, hash)
 		if err != nil {
+			// Record the miss so `wand tidy` knows this run was incomplete and
+			// must not treat its reachability data as authoritative.
+			_ = s.Store.AppendAccess(Access{Service: service, Hash: hash, Missing: true})
 			http.Error(w, fmt.Sprintf("fixture miss for %s (%s): %s\nnormalized request: %s", service, hash, err, normalizedReq), http.StatusNotFound)
 			return
 		}
+		// Mark this fixture reached for `wand tidy`.
+		_ = s.Store.AppendAccess(Access{Service: service, Hash: hash})
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(fixtureResp)
 	case "CAPTURE":
@@ -87,6 +92,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = s.Store.Write(service, hash, normalizedReq, normalizedResp)
+		// A freshly captured fixture is reachable by definition — mark it so a
+		// capture run also feeds `wand tidy`.
+		_ = s.Store.AppendAccess(Access{Service: service, Hash: hash})
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(resp)
 	case "PASSTHROUGH":

@@ -2,3 +2,6 @@
 
 # Transient livetest divergences (input to `wand doctor`, not a fixture)
 __fixtures__/livetest_divergences.jsonl
+
+# Transient fixture-access log (input to `wand tidy`, not a fixture)
+__fixtures__/access.jsonl
