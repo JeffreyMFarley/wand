@@ -390,6 +390,36 @@ mechanical execution. The proxy handles all mechanical work without Claude.
 | `wand scaffold <file-or-dir>...` | Reads each given source file (directories are walked to source files) and generates an integration test for it, placed by language convention (Go beside source, Python mirrored under tests/, JS/TS beside source, PHP beside source, Ruby mirrored under spec/, Java mirrored from src/main/java into src/test/java); non-qualifying files are skipped |
 | CI miss explanation | When `ci` mode fails to find a fixture, Claude inspects the normalized request and suggests whether a missing normalization rule is the likely cause |
 
+### The god-function rule
+
+`scaffold` qualifies any function or method over **400 lines automatically** —
+length alone, with no requirement that a qualifying external call be found in it.
+This is deliberate, and it is not really about that one function's correctness.
+
+The premise is behavioral: a developer who lacked the discipline to split a
+1200-line function did not write tests for it either, so a god function is a
+reliable marker for *exactly where coverage is missing*. Requiring the scanner to
+first locate an external call buried under fifty variables and deep nesting just
+reintroduces the failure it is trying to catch — the call is missed, the file is
+disqualified, and the least-tested code stays untested. Length is the signal we
+can detect without that risk.
+
+The generated test is intentionally vague: it exercises the whole function
+end-to-end and asserts **only on the final return value** (see the god-function
+step in the scaffold prompt). It is a characterization pin, not a correctness
+check — it keeps passing while the interior is torn apart, which is the point.
+Its real payoff is the **fixtures captured downstream** from whatever calls the
+function makes: in practice one 1200-line function yielded ~200 fixtures, and only
+once those existed was it safe to refactor fifty positional args into a dict input
+and break the body into modular functions.
+
+One consequence of dropping the external-call condition: a god function that
+reaches *nothing* external still qualifies. It gets the return-value pin (a real
+refactoring net) but produces no fixtures — the fixture payoff lands only when
+there is a call buried somewhere inside. That trade is accepted on purpose: a
+harmless empty-fixture test on a pure god function is far cheaper than silently
+skipping a god function whose call the scanner couldn't find.
+
 ### Claude API usage
 
 All Claude calls use `claude-sonnet-4-6`. API key comes from `ANTHROPIC_API_KEY`
