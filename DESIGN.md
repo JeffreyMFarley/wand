@@ -373,6 +373,55 @@ Every fixture file begins with a one-line metadata header:
 The proxy checks this on read and fails clearly if the version is incompatible, rather
 than silently mismatching.
 
+### Reachability and `tidy`
+
+Content-addressing makes capture **purely additive**: the hash is derived from the
+normalized request, so when a code change alters a request shape it produces a *new*
+hash and a *new* fixture. The old fixture is never overwritten — it is simply never
+requested again. Left alone, the store grows monotonically, accumulating orphans every
+time a request changes. This is the same shape as git objects: adding is cheap and
+additive, and the only way to reclaim dead ones is a separate reachability sweep.
+
+`wand tidy` is that sweep, modeled on `git gc` rather than on delete-everything:
+
+- **Mark.** Every code path that serves a fixture appends the fixture it touched to a
+  run-local log, `__fixtures__/access.jsonl` (one compact JSON object per line —
+  `{"service","hash","missing"?}` — mirroring the divergence log). Both request paths
+  record: the Go proxy (`ci` hits/misses, `capture` writes) *and* the boto3 shim, which
+  replays from disk without ever touching the proxy. A `missing:true` entry marks a
+  `ci` miss.
+- **Sweep.** `wand tidy` loads the log, computes the set of reached fixtures, and reports
+  every stored fixture the last run did *not* touch. It runs against the committed store
+  in `ci` mode, so **no live credentials are needed** — the sweep is pure replay.
+
+Why this beats the old "delete all fixtures, then re-capture everything" ritual: that
+ritual needed live creds for every service and a green full-suite *live* run just to
+clean up, and it destroyed the curated `scenario`/`tests` metadata in `index.json`.
+`tidy` needs no creds, and preserves the metadata of every fixture still in use.
+
+**Safety model.** The only real hazard is a *partial* mark run: if the recorded run
+exercised a subset of tests, fixtures for the un-run tests look unreached and would be
+wrongly deleted. Three properties guard against this:
+
+- **Dry-run by default.** Plain `wand tidy` only lists orphans; deletion requires an
+  explicit `--force`.
+- **A human-verified full, passing run.** The developer runs the whole suite green
+  before sweeping — the tool cannot see the test runner's exit code, so this is the
+  load-bearing guarantee, and the CLI states it at every step. `--reset` clears the log
+  so the marking run starts from a clean slate (stale marks from before a code change
+  would otherwise keep dead fixtures alive).
+- **Misses are a hint, not a blocker.** An early design refused to delete whenever a
+  miss was recorded, on the theory that a miss meant an aborted run. Real usage
+  disproved it: application code routinely makes best-effort API calls and *catches* the
+  absence, so misses coexist with a perfectly green suite — blocking on them made `tidy`
+  unusable for such projects. And a miss never detected the actual danger anyway, since a
+  partial run produces *zero* misses. So misses are now reported as a coverage hint
+  ("these calls have no stored fixture — capture them if they matter") and never gate
+  deletion.
+
+After a successful `--force`, the deleted fixtures' `index.json` entries are dropped and
+the access log is cleared, so the next tidy cycle starts fresh.
+
 ---
 
 ## Claude Integration Points
@@ -445,6 +494,7 @@ wand capture --name                    Name captured fixtures (post-capture, Cla
 wand diff                              Semantic diff of changed fixtures (git diff)
 wand diff --pr <number>                Semantic diff of fixtures changed in a PR
 wand doctor                            livetest all fixtures, classify divergences
+wand tidy [--force] [--reset]          Delete fixtures unreached by the last ci-mode run
 wand verify                            ci mode dry-run, report any misses
 wand explain <hash>                    What scenario does this fixture cover?
 wand scaffold <file-or-dir>...         Generate integration tests for the given source files/dirs
@@ -455,7 +505,7 @@ wand normalize check                   Detect over-normalization risks (collisio
 
 ### Design principles for the CLI
 
-- Commands split into **plumbing** (`proxy start/stop/status`, `verify`) and
+- Commands split into **plumbing** (`proxy start/stop/status`, `verify`, `tidy`) and
   **agentic** (`capture`, `diff`, `doctor`, `scaffold`, `explain`).
 - Plumbing commands work without Claude and without an API key.
 - Agentic commands always show their proposed scope to the developer and ask for

@@ -191,6 +191,75 @@ func TestRunInitDoesNotClobberExistingConftest(t *testing.T) {
 	}
 }
 
+func TestRunInitManagesGitignore(t *testing.T) {
+	t.Run("creates gitignore when absent", func(t *testing.T) {
+		d := t.TempDir()
+		t.Chdir(d)
+		if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+			t.Fatalf("write go.mod: %v", err)
+		}
+
+		if err := NewRouter(Config{}).Run([]string{"init"}); err != nil {
+			t.Fatalf("init: %v", err)
+		}
+
+		got, err := os.ReadFile(filepath.Join(d, ".gitignore"))
+		if err != nil {
+			t.Fatalf("read .gitignore: %v", err)
+		}
+		for _, entry := range runLocalIgnores {
+			if !strings.Contains(string(got), entry) {
+				t.Errorf("expected .gitignore to contain %q, got:\n%s", entry, got)
+			}
+		}
+	})
+
+	t.Run("appends missing entries and preserves existing content, idempotently", func(t *testing.T) {
+		d := t.TempDir()
+		t.Chdir(d)
+		if err := os.WriteFile(filepath.Join(d, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+			t.Fatalf("write go.mod: %v", err)
+		}
+		// One wand entry already present, plus the user's own rule.
+		const existing = "node_modules\n__fixtures__/access.jsonl\n"
+		if err := os.WriteFile(filepath.Join(d, ".gitignore"), []byte(existing), 0o644); err != nil {
+			t.Fatalf("write .gitignore: %v", err)
+		}
+
+		r := NewRouter(Config{})
+		if err := r.Run([]string{"init"}); err != nil {
+			t.Fatalf("init: %v", err)
+		}
+		first, err := os.ReadFile(filepath.Join(d, ".gitignore"))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		s := string(first)
+		if !strings.Contains(s, "node_modules") {
+			t.Errorf("user rule was dropped:\n%s", s)
+		}
+		// The already-present entry must not be duplicated.
+		if strings.Count(s, "__fixtures__/access.jsonl") != 1 {
+			t.Errorf("access.jsonl should appear exactly once:\n%s", s)
+		}
+		if !strings.Contains(s, "__fixtures__/livetest_divergences.jsonl") {
+			t.Errorf("missing divergence entry not appended:\n%s", s)
+		}
+
+		// Re-running init must not change a now-complete .gitignore.
+		if err := r.Run([]string{"init"}); err != nil {
+			t.Fatalf("init (rerun): %v", err)
+		}
+		second, err := os.ReadFile(filepath.Join(d, ".gitignore"))
+		if err != nil {
+			t.Fatalf("read (rerun): %v", err)
+		}
+		if string(second) != s {
+			t.Errorf("second init changed a complete .gitignore:\nbefore:\n%s\nafter:\n%s", s, second)
+		}
+	})
+}
+
 func TestResolveCaptureTargets(t *testing.T) {
 	d := t.TempDir()
 	mk := func(rel string) {

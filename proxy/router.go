@@ -126,10 +126,70 @@ func (r *Router) runInit(args []string) error {
 		return err
 	}
 
+	// Keep wand's transient run logs out of version control. Applies to every
+	// consumer (the HTTP proxy and the boto3 shim both write these), not just
+	// python projects, so it runs before the language-specific shim install.
+	if err := r.ensureRunLocalGitignore(root); err != nil {
+		return err
+	}
+
 	// Shims are tool-managed code, so installing them is independent of whether
 	// the config already existed — re-running init on a python project keeps the
 	// shims in sync with the installed wand version.
 	return r.installPythonShims(root)
+}
+
+// runLocalIgnores are proxy/shim run artifacts that live under the fixtures path
+// but are not fixtures — inputs to `wand doctor` and `wand tidy`, regenerated
+// every run. They must never be committed.
+var runLocalIgnores = []string{
+	"__fixtures__/livetest_divergences.jsonl",
+	"__fixtures__/access.jsonl",
+}
+
+// ensureRunLocalGitignore makes sure the project's .gitignore excludes wand's
+// transient run logs. Only missing entries are appended, under a labeled block,
+// so re-running init is idempotent and never disturbs the user's own rules.
+func (r *Router) ensureRunLocalGitignore(root string) error {
+	path := filepath.Join(root, ".gitignore")
+	existing := ""
+	if data, err := os.ReadFile(path); err == nil {
+		existing = string(data)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	present := map[string]bool{}
+	for _, line := range strings.Split(existing, "\n") {
+		present[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, entry := range runLocalIgnores {
+		if !present[entry] {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	b.WriteString(existing)
+	if existing != "" && !strings.HasSuffix(existing, "\n") {
+		b.WriteString("\n")
+	}
+	if existing != "" {
+		b.WriteString("\n")
+	}
+	b.WriteString("# wand transient run logs (inputs to doctor/tidy, not fixtures)\n")
+	for _, entry := range missing {
+		b.WriteString(entry + "\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("updated .gitignore: %s\n", strings.Join(missing, ", "))
+	return nil
 }
 
 // installPythonShims drops the python client-side shims into the project when a
