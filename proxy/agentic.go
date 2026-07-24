@@ -100,9 +100,16 @@ func (r *Router) runScaffold(args []string) error {
 	}
 
 	client := NewClaudeClient()
+
+	// Same verdict cache as `wand scan`: a prior scan's qualify results are
+	// reused here, and scaffold's own qualify calls are cached for next time.
+	// An optimization only — openScanCache tolerates a missing or unreadable log.
+	cache := openScanCache(scanCacheFile, scanCacheVersion(client.Model()))
+	defer cache.Close()
+
 	var written, skipped int
 	for _, src := range sources {
-		wrote, err := r.scaffoldOne(client, src)
+		wrote, err := r.scaffoldOne(client, cache, src)
 		if err != nil {
 			return err
 		}
@@ -130,24 +137,51 @@ func scaffoldUserMessage(src string, data []byte) string {
 
 // completer is the slice of ClaudeClient the scaffold/scan flows depend on.
 // Narrowing to an interface lets tests substitute a stub verdict source without
-// real API calls or credentials.
+// real API calls or credentials. It exposes the usage-returning call so scan can
+// meter tokens; callers that don't care (scaffold) simply ignore the Usage.
 type completer interface {
-	Complete(ctx context.Context, system, user string) (string, error)
+	CompleteWithUsage(ctx context.Context, system, user string) (string, Usage, error)
 }
 
 // qualifyForTest runs the cheap classification call for one source file,
 // reporting whether it warrants an integration test and, when it does not, the
-// one-line reason from the prompt. Shared by `wand scan` and `wand scaffold` so
-// both classify identically.
-func qualifyForTest(ctx context.Context, client completer, user string) (qualifies bool, reason string, err error) {
-	verdict, err := client.Complete(ctx, scaffoldQualifySystemPrompt, user)
+// one-line reason from the prompt, plus the call's token usage. Shared by
+// `wand scan` and `wand scaffold` so both classify identically.
+func qualifyForTest(ctx context.Context, client completer, user string) (qualifies bool, reason string, usage Usage, err error) {
+	verdict, usage, err := client.CompleteWithUsage(ctx, scaffoldQualifySystemPrompt, user)
 	if err != nil {
-		return false, "", err
+		return false, "", Usage{}, err
 	}
 	if reason, skip := noIntegrationTest(verdict); skip {
-		return false, reason, nil
+		return false, reason, usage, nil
 	}
-	return true, "", nil
+	return true, "", usage, nil
+}
+
+// qualifyCached resolves a source file's qualify verdict by the cheapest route
+// that suffices: a content-hash cache hit, else the static pre-filter, else an
+// LLM qualify call (whose result is cached). It returns the verdict, the route
+// taken (for progress reporting), and the tokens the call cost — zero unless it
+// reached the model. Shared by `wand scan` and `wand scaffold` so a prior scan
+// spares scaffold the re-qualify, and both classify identically. The caller
+// passes the already-read file bytes so the file is read only once.
+func qualifyCached(ctx context.Context, client completer, cache *scanCache, src string, data []byte) (qualifies bool, reason string, route scanRoute, tokens int, err error) {
+	if v, ok := cache.get(Hash(data)); ok {
+		return v.Qualifies, v.Reason, routeCached, 0, nil
+	}
+	if !mayMakeExternalCall(src, data) {
+		// Provably no external call and too short for a god function. Not cached
+		// — it's recomputed for free every run, and caching it would let a later
+		// change to the signal lists serve a stale verdict (the cache is keyed on
+		// the prompt+model, not the filter).
+		return false, prefilterReason, routePrefiltered, 0, nil
+	}
+	qualifies, reason, usage, err := qualifyForTest(ctx, client, scaffoldUserMessage(src, data))
+	if err != nil {
+		return false, "", routeAsked, 0, err
+	}
+	cache.put(Hash(data), qualifies, reason)
+	return qualifies, reason, routeAsked, usage.Tokens(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -174,11 +208,34 @@ func (r *Router) runScan(args []string) error {
 	client := NewClaudeClient()
 	fmt.Printf("scanning %d source file(s) with %s...\n", len(sources), client.Model())
 
-	// Live counter, overwritten in place, so a long sweep shows progress
-	// instead of appearing hung. Results land out of order (concurrent), so a
-	// running count is clearer than per-file lines.
-	results, err := scanSources(client, sources, func(done, total int, _ scanClassification) {
-		fmt.Printf("\r  %d/%d scanned", done, total)
+	// Verdicts from prior runs (same prompt+model, unchanged files) are reused
+	// from disk; the cache also persists this run's verdicts as they land, so an
+	// interrupted scan resumes for free. It's an optimization, never required —
+	// openScanCache tolerates a missing or unreadable log.
+	cache := openScanCache(scanCacheFile, scanCacheVersion(client.Model()))
+	defer cache.Close()
+
+	// Live counter, overwritten in place, so a long sweep shows progress instead
+	// of appearing hung. The route tallies show how much the cache and
+	// pre-filter saved — most files resolve instantly, so the count visibly
+	// races rather than crawling one API round-trip at a time.
+	var cached, prefiltered, asked, qualifyCount, tokens int
+	fmt.Printf("\r  0/%d", len(sources))
+	results, err := scanSources(client, cache, sources, func(done, total int, res scanClassification) {
+		switch res.route {
+		case routeCached:
+			cached++
+		case routePrefiltered:
+			prefiltered++
+		default:
+			asked++
+		}
+		if res.qualifies {
+			qualifyCount++
+		}
+		tokens += res.tokens
+		fmt.Printf("\r  %d/%d   cached %d · prefiltered %d · asked %d · qualifies %d · %s tokens",
+			done, total, cached, prefiltered, asked, qualifyCount, humanTokens(tokens))
 	})
 	fmt.Println() // finish the progress line before the report (or an error)
 	if err != nil {
@@ -220,9 +277,34 @@ func (r *Router) runScan(args []string) error {
 type scanClassification struct {
 	src       string
 	qualifies bool
-	reason    string // why it was skipped, when !qualifies
-	dest      string // where the test would land, when qualifies
-	exists    bool   // whether that test file already exists, when qualifies
+	reason    string    // why it was skipped, when !qualifies
+	dest      string    // where the test would land, when qualifies
+	exists    bool      // whether that test file already exists, when qualifies
+	route     scanRoute // how the verdict was reached, for the progress summary
+	tokens    int       // non-cached tokens the LLM call cost (0 if cached/pre-filtered)
+}
+
+// scanRoute records how a file's verdict was obtained, so the progress line can
+// show how much work the cache and pre-filter saved.
+type scanRoute int
+
+const (
+	routeAsked       scanRoute = iota // classified by an LLM qualify call
+	routeCached                       // served from the on-disk verdict cache
+	routePrefiltered                  // rejected by the static pre-filter, no LLM
+)
+
+// humanTokens renders a running token count compactly for the progress line:
+// 1_234 -> "1.2K", 2_500_000 -> "2.5M", smaller counts as-is.
+func humanTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // scanConcurrency bounds how many qualify calls are in flight at once. A scan of
@@ -231,22 +313,28 @@ type scanClassification struct {
 // cutting wall-clock time by roughly this factor.
 const scanConcurrency = 8
 
-// classifyForScan runs the qualify call for one source file and records where
-// its test would land and whether one already exists. Only I/O and API errors
-// are returned; a file that doesn't qualify, or one whose extension has no
-// test-path convention, comes back as a non-qualifying result with a reason
-// (mirroring scaffold's per-file tolerance).
-func classifyForScan(ctx context.Context, client completer, src string) (scanClassification, error) {
+// classifyForScan resolves one source file's verdict and records where its test
+// would land and whether one already exists. The verdict is reached by the
+// cheapest route that suffices: a content-hash cache hit, else the static
+// pre-filter, else an LLM qualify call (whose result is cached). Only I/O and
+// API errors are returned; a file that doesn't qualify, or one whose extension
+// has no test-path convention, comes back as a non-qualifying result with a
+// reason (mirroring scaffold's per-file tolerance).
+func classifyForScan(ctx context.Context, client completer, cache *scanCache, src string) (scanClassification, error) {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return scanClassification{}, err
 	}
-	qualifies, reason, err := qualifyForTest(ctx, client, scaffoldUserMessage(src, data))
+
+	qualifies, reason, route, tokens, err := qualifyCached(ctx, client, cache, src, data)
 	if err != nil {
 		return scanClassification{}, err
 	}
-	res := scanClassification{src: src, qualifies: qualifies, reason: reason}
-	if qualifies {
+	res := scanClassification{src: src, qualifies: qualifies, reason: reason, route: route, tokens: tokens}
+
+	// dest/exists are always recomputed (never cached): a cheap stat that keeps
+	// a newly added or moved test file reflected regardless of the verdict route.
+	if res.qualifies {
 		dest, err := testPathFor(src)
 		if err != nil {
 			// Unsupported extension (only reachable via an explicit file
@@ -274,7 +362,7 @@ func classifyForScan(ctx context.Context, client completer, src string) (scanCla
 // shared context is cancelled, which kills in-flight `claude` calls and stops
 // new ones from launching, so a failure surfaces where it happens instead of
 // after every remaining file has been scanned.
-func scanSources(client completer, sources []string, progress func(done, total int, res scanClassification)) ([]scanClassification, error) {
+func scanSources(client completer, cache *scanCache, sources []string, progress func(done, total int, res scanClassification)) ([]scanClassification, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -298,7 +386,7 @@ func scanSources(client completer, sources []string, progress func(done, total i
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			res, err := classifyForScan(ctx, client, src)
+			res, err := classifyForScan(ctx, client, cache, src)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -333,7 +421,7 @@ func scanSources(client completer, sources []string, progress func(done, total i
 // file doesn't qualify per the prompt or a test already exists). Only I/O and
 // API errors are returned; per-file skips are printed and swallowed so one
 // unqualifying file never aborts a directory sweep.
-func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
+func (r *Router) scaffoldOne(client completer, cache *scanCache, src string) (bool, error) {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return false, err
@@ -349,12 +437,11 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 		return false, nil
 	}
 
-	user := scaffoldUserMessage(src, data)
-
-	// Qualify first: a cheap classification call decides whether the file
-	// warrants an integration test at all. If it doesn't, skip without paying
-	// for the (much larger) generation call.
-	qualifies, reason, err := qualifyForTest(context.Background(), client, user)
+	// Qualify first (cache -> pre-filter -> LLM): a cheap decision on whether the
+	// file warrants an integration test at all. A prior `wand scan` may have
+	// already cached this verdict, sparing the call; a non-qualifying file skips
+	// the much larger generation call.
+	qualifies, reason, _, _, err := qualifyCached(context.Background(), client, cache, src, data)
 	if err != nil {
 		return false, err
 	}
@@ -366,7 +453,8 @@ func (r *Router) scaffoldOne(client *ClaudeClient, src string) (bool, error) {
 	// Qualified: generate the test file. The write prompt keeps the same
 	// "No integration test." escape hatch in case a closer reading finds no
 	// directly-qualifying subject after all.
-	out, err := client.Complete(context.Background(), scaffoldWriteSystemPrompt, user)
+	user := scaffoldUserMessage(src, data)
+	out, _, err := client.CompleteWithUsage(context.Background(), scaffoldWriteSystemPrompt, user)
 	if err != nil {
 		return false, err
 	}

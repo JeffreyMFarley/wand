@@ -139,12 +139,13 @@ func (r *Router) runInit(args []string) error {
 	return r.installPythonShims(root)
 }
 
-// runLocalIgnores are proxy/shim run artifacts that live under the fixtures path
-// but are not fixtures — inputs to `wand doctor` and `wand tidy`, regenerated
-// every run. They must never be committed.
+// runLocalIgnores are wand run artifacts — inputs to `wand doctor`/`wand tidy`
+// and the `wand scan` verdict cache — regenerated every run and never fixtures,
+// so they must never be committed.
 var runLocalIgnores = []string{
 	"__fixtures__/livetest_divergences.jsonl",
 	"__fixtures__/access.jsonl",
+	scanCacheFile,
 }
 
 // ensureRunLocalGitignore makes sure the project's .gitignore excludes wand's
