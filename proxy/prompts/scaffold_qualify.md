@@ -89,9 +89,11 @@ and comments
 Work through the checklist silently. Your entire response must be exactly one line
 and nothing else — no preamble, no reasoning, no code.
 
-- If at least one class or function makes a qualifying external call, output exactly:
+- If at least one class or function makes a qualifying external call, output:
 
-  > QUALIFIES
+  > QUALIFIES. [One sentence naming the qualifying call — e.g. "Calls requests.get()
+  > over HTTP," "Runs a Snowflake query via the connector," "Invokes the S3 client's
+  > put_object."]
 
 - Otherwise, output:
 

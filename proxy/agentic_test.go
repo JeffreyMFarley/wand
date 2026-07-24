@@ -152,6 +152,20 @@ func TestNoIntegrationTest(t *testing.T) {
 	}
 }
 
+func TestQualifiesReason(t *testing.T) {
+	cases := map[string]string{
+		"QUALIFIES. Calls requests.get() over HTTP": "Calls requests.get() over HTTP",
+		"> QUALIFIES. Runs a Snowflake query":       "Runs a Snowflake query",
+		"QUALIFIES":                                 "", // bare verdict, no reason given
+		"No integration test. Pure data container":  "", // not a qualification
+	}
+	for in, want := range cases {
+		if got := qualifiesReason(in); got != want {
+			t.Errorf("qualifiesReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseTestListJSON(t *testing.T) {
 	got := parseTestList("Here you go:\n[\"a::t1\", \"b::t2\"]")
 	if len(got) != 2 || got[0] != "a::t1" || got[1] != "b::t2" {
@@ -398,6 +412,33 @@ func TestScaffoldUsesCacheAndPrefilter(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join("tests", "test_client.py")); err != nil {
 		t.Errorf("expected generated test at tests/test_client.py: %v", err)
+	}
+}
+
+func TestQualifyingReasonIsCachedAndReported(t *testing.T) {
+	d := t.TempDir()
+	body := []byte("import requests\n")
+	if err := os.WriteFile(filepath.Join(d, "svc.py"), body, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Chdir(d)
+
+	cache := newTestCache(t)
+	client := stubCompleter{verdicts: map[string]string{
+		"svc.py": "QUALIFIES. Calls requests.get() over HTTP",
+	}}
+
+	res, err := classifyForScan(context.Background(), client, cache, "svc.py")
+	if err != nil {
+		t.Fatalf("classifyForScan: %v", err)
+	}
+	if !res.qualifies || res.reason != "Calls requests.get() over HTTP" {
+		t.Errorf("res = %+v, want qualifying with the reason carried through", res)
+	}
+	// The reason must be persisted in the cache, not just the qualifies boolean,
+	// so a later scan/scaffold run reports why the file qualifies without a call.
+	if v, ok := cache.get(Hash(body)); !ok || !v.Qualifies || v.Reason != "Calls requests.get() over HTTP" {
+		t.Errorf("cached verdict = %+v (ok=%v), want qualifying with reason", v, ok)
 	}
 }
 

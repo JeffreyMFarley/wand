@@ -144,9 +144,10 @@ type completer interface {
 }
 
 // qualifyForTest runs the cheap classification call for one source file,
-// reporting whether it warrants an integration test and, when it does not, the
-// one-line reason from the prompt, plus the call's token usage. Shared by
-// `wand scan` and `wand scaffold` so both classify identically.
+// reporting whether it warrants an integration test and the one-line reason from
+// the prompt — why it qualifies (the external call found) or why it doesn't —
+// plus the call's token usage. Shared by `wand scan` and `wand scaffold` so both
+// classify identically.
 func qualifyForTest(ctx context.Context, client completer, user string) (qualifies bool, reason string, usage Usage, err error) {
 	verdict, usage, err := client.CompleteWithUsage(ctx, scaffoldQualifySystemPrompt, user)
 	if err != nil {
@@ -155,7 +156,7 @@ func qualifyForTest(ctx context.Context, client completer, user string) (qualifi
 	if reason, skip := noIntegrationTest(verdict); skip {
 		return false, reason, usage, nil
 	}
-	return true, "", usage, nil
+	return true, qualifiesReason(verdict), usage, nil
 }
 
 // qualifyCached resolves a source file's qualify verdict by the cheapest route
@@ -243,15 +244,24 @@ func (r *Router) runScan(args []string) error {
 	}
 	fmt.Println()
 
+	// reasonSuffix renders the qualifying justification in parentheses, when the
+	// prompt gave one (a cache entry from an older prompt may not have).
+	reasonSuffix := func(reason string) string {
+		if reason == "" {
+			return ""
+		}
+		return fmt.Sprintf("  (%s)", reason)
+	}
+
 	var qualifying, existing, skipped []string
 	for _, res := range results {
 		switch {
 		case !res.qualifies:
 			skipped = append(skipped, fmt.Sprintf("  %s: %s", res.src, res.reason))
 		case res.exists:
-			existing = append(existing, fmt.Sprintf("  %s -> %s", res.src, res.dest))
+			existing = append(existing, fmt.Sprintf("  %s -> %s%s", res.src, res.dest, reasonSuffix(res.reason)))
 		default:
-			qualifying = append(qualifying, fmt.Sprintf("  %s -> %s", res.src, res.dest))
+			qualifying = append(qualifying, fmt.Sprintf("  %s -> %s%s", res.src, res.dest, reasonSuffix(res.reason)))
 		}
 	}
 
@@ -277,7 +287,7 @@ func (r *Router) runScan(args []string) error {
 type scanClassification struct {
 	src       string
 	qualifies bool
-	reason    string    // why it was skipped, when !qualifies
+	reason    string    // why it qualifies (the external call) or why it was skipped
 	dest      string    // where the test would land, when qualifies
 	exists    bool      // whether that test file already exists, when qualifies
 	route     scanRoute // how the verdict was reached, for the progress summary
@@ -522,6 +532,19 @@ func noIntegrationTest(out string) (reason string, skip bool) {
 		reason = "no qualifying external calls"
 	}
 	return reason, true
+}
+
+// qualifiesReason extracts the one-line justification the qualify prompt gives
+// after a "QUALIFIES. <reason>" verdict — the external call that qualified the
+// file. It returns "" when no reason is present (a bare "QUALIFIES", e.g. from
+// an older prompt), so a missing reason is never treated as an error.
+func qualifiesReason(out string) string {
+	trimmed := strings.TrimLeft(strings.TrimSpace(out), "> ") // may arrive as a blockquote
+	const marker = "QUALIFIES"
+	if !strings.HasPrefix(trimmed, marker) {
+		return ""
+	}
+	return firstLine(strings.TrimLeft(strings.TrimPrefix(trimmed, marker), ".:- "))
 }
 
 // ---------------------------------------------------------------------------

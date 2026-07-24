@@ -36,12 +36,12 @@ Given files and/or directories:
 **Read [references/qualify.md](references/qualify.md)** and apply it to every
 resolved file. Each file gets exactly one verdict:
 
-- `QUALIFIES`, or
+- `QUALIFIES. <one-sentence reason>`, or
 - `No integration test. <one-sentence reason>`
 
 ## 3. Report scope — and stop
 
-Print a table: file → verdict (with the one-line reason for non-qualifiers).
+Print a table: file → verdict, each with its one-line reason.
 End with a count: `N files scanned, M qualify for integration tests.`
 
 **Generate nothing.** If the user then wants the tests written, hand off to
